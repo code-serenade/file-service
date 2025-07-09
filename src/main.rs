@@ -9,15 +9,12 @@ use std::sync::Arc;
 
 use service_utils_rs::services::{http::http_server, jwt::Jwt};
 use settings::Settings;
-use tracing::{error, info};
 
 use crate::logging::init_tracing_to_file;
 
 #[tokio::main]
 async fn main() {
     init_tracing_to_file();
-    info!("服务已启动");
-    error!("错误日志示例");
     let settings = Settings::load("config/services.toml").unwrap();
 
     let jwt = Arc::new(Jwt::new(settings.jwt));
