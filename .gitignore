@@ -1,0 +1,5 @@
+/target
+/logs
+
+#MacOS
+**/.DS_Store
