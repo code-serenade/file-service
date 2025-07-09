@@ -9,9 +9,8 @@ use toolcraft::s3::generate_post_policy;
 use crate::{error::error_code, models::s3::PolicyResponse, settings::S3Cfg};
 
 #[utoipa::path(
-    post,
+    get,
     path = "/policy",
-    // request_body = RunWorkflowRequest,
     responses(
         (status = 200, description = "Succeed", body = CommonResponse<PolicyResponse>),
         (status = 500, description = "Error", body = CommonError)
