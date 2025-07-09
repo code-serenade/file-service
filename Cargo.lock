@@ -2364,7 +2364,9 @@ dependencies = [
 
 [[package]]
 name = "toolcraft"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b996092c570d749735ff896ee184ca15d363303d837ea9d3e6037641be764390"
 dependencies = [
  "base64 0.22.1",
  "chrono",

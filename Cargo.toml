@@ -21,4 +21,4 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 utoipa-axum = { version = "0.2" }
 service_utils_rs = { version = "0.3.20", features = ["jwt", "http"] }
-toolcraft = { path = "/Users/ancient/src/rust/toolcraft" }
+toolcraft = { version = "0.1.1" }
