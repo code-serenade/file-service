@@ -29,7 +29,7 @@ pub async fn policy(
         &s3.access_key,
         &s3.secret_key,
         &s3.bucket_name,
-        "key_prefix/",
+        "upload/",
         &s3.region,
         &s3.endpoint,
         10,
