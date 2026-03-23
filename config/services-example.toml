@@ -1,18 +1,16 @@
 [http]
-port = 19878
+port = 29002
 
-[jwt]
-audience = "test"
-access_token_duration = 10800                                                                                                                       # 3 hours
-refresh_token_duration = 604800                                                                                                                     # 1 week
-access_key_validate_exp = true
-refresh_key_validate_exp = false
-access_secret = "3a5df12e1fc87ad045e1767e3f6a285da64139de0199f3d7b1d869f03d8eae30e130bacc2018d8c2e1dced55eac6fbb45f0cf283a5f64dc75a886ac8fd3937e5"
-refresh_secret = "b26f570b5d72795815f898cea04a4234a932cded824081767698e58e13ff849f3b6e23fe34efb4f6d78e342f1be4eace18135994e51a070c605c6dc9698a5fab"
+[jwt_verify]
+url = "http://10.100.11.246:29001/internal/jwt_verify_config"
+header = "x-internal-token"
+token = "dev-internal-token-change-me"
 
 [s3]
 endpoint = "http://127.0.0.1:9000"
-bucket_name = "test-bucket"
-region = "local_region"
+public_bucket = "test-public-bucket"
+private_bucket = "test-private-bucket"
+region = "us-east-1"
 access_key = "ROOTNAME"
 secret_key = "CHANGEME123"
+user_key_salt = "please-change-to-random-long-string"

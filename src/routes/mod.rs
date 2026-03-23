@@ -3,10 +3,8 @@ mod s3;
 use std::sync::Arc;
 
 use axum::{Extension, Router, middleware::from_fn};
-use service_utils_rs::services::{
-    http::middleware::{auth_mw::auth, cors::create_cors},
-    jwt::Jwt,
-};
+use toolcraft_axum_kit::middleware::{auth_mw::auth, cors::create_cors};
+use toolcraft_jwt::VerifyJwt;
 use utoipa::{
     OpenApi,
     openapi::security::{ApiKey, SecurityScheme},
@@ -18,12 +16,12 @@ use crate::{routes::s3::S3Api, settings::S3Cfg};
 #[derive(OpenApi)]
 #[openapi(
         nest(
-            (path = "/s3", api = S3Api),
+            (path = "/sign", api = S3Api),
         ),
     )]
 struct ApiDoc;
 
-pub fn create_routes(jwt: Arc<Jwt>, s3: Arc<S3Cfg>) -> Router {
+pub fn create_routes(jwt: Arc<VerifyJwt>, s3: Arc<S3Cfg>) -> Router {
     let cors = create_cors();
     let mut doc = ApiDoc::openapi();
     doc.components
@@ -39,8 +37,8 @@ pub fn create_routes(jwt: Arc<Jwt>, s3: Arc<S3Cfg>) -> Router {
         );
 
     Router::new()
-        .nest("/s3", s3::s3_routes())
-        .route_layer(from_fn(auth))
+        .nest("/sign", s3::s3_routes())
+        .route_layer(from_fn(auth::<VerifyJwt>))
         .layer(Extension(jwt))
         .layer(Extension(s3))
         .layer(cors)
