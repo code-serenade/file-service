@@ -38,12 +38,12 @@ pub fn create_routes(jwt: Arc<VerifyJwt>, s3: Arc<S3Cfg>) -> Router {
 
     let api_router = Router::new()
         .nest("/sign", s3::s3_routes())
-        .route_layer(from_fn(auth::<VerifyJwt>))
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", doc));
+        .route_layer(from_fn(auth::<VerifyJwt>));
 
     Router::new()
         .nest("/file", api_router)
         .layer(Extension(jwt))
         .layer(Extension(s3))
         .layer(cors)
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", doc))
 }
