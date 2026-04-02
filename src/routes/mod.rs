@@ -16,7 +16,7 @@ use crate::{routes::s3::S3Api, settings::S3Cfg};
 #[derive(OpenApi)]
 #[openapi(
         nest(
-            (path = "/sign", api = S3Api),
+            (path = "/file/sign", api = S3Api),
         ),
     )]
 struct ApiDoc;
@@ -36,11 +36,14 @@ pub fn create_routes(jwt: Arc<VerifyJwt>, s3: Arc<S3Cfg>) -> Router {
             )),
         );
 
-    Router::new()
+    let api_router = Router::new()
         .nest("/sign", s3::s3_routes())
         .route_layer(from_fn(auth::<VerifyJwt>))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", doc));
+
+    Router::new()
+        .nest("/file", api_router)
         .layer(Extension(jwt))
         .layer(Extension(s3))
         .layer(cors)
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", doc))
 }
