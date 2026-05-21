@@ -6,6 +6,8 @@ use toolcraft_axum_kit::{
 };
 use toolcraft_request::{HeaderMap, Request};
 use toolcraft_utils::{presign_get_object, sign_request};
+use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::{
     error::error_code,
@@ -16,7 +18,6 @@ use crate::{
     settings::S3Cfg,
     utils::base62::encode_u128,
 };
-use uuid::Uuid;
 
 pub async fn upload_avatar(
     Extension(auth_user): Extension<AuthUser>,
@@ -201,12 +202,14 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
                 Json(error_code::BAD_GATEWAY.into()),
             )
         })?;
-    headers.insert("x-amz-date", signed.x_amz_date).map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(error_code::BAD_GATEWAY.into()),
-        )
-    })?;
+    headers
+        .insert("x-amz-date", signed.x_amz_date)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
     headers
         .insert("x-amz-content-sha256", signed.x_amz_content_sha256)
         .map_err(|_| {
@@ -217,31 +220,86 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         })?;
 
     let object_url = format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key);
+    debug!(
+        endpoint = %s3.endpoint,
+        host = %host,
+        region = ?region,
+        bucket = %bucket,
+        key = %key,
+        object_url = %object_url,
+        "checking s3 object existence"
+    );
+
     let client = Request::new().map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
             Json(error_code::BAD_GATEWAY.into()),
         )
     })?;
-    let response = client.head(&object_url, Some(headers)).await.map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(error_code::BAD_GATEWAY.into()),
-        )
-    })?;
+    let response = client
+        .head(&object_url, Some(headers))
+        .await
+        .map_err(|err| {
+            warn!(
+                error = %err,
+                error_debug = ?err,
+                bucket = %bucket,
+                key = %key,
+                object_url = %object_url,
+                "s3 object HEAD request failed before response"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+
+    debug!(
+        status = response.status().as_u16(),
+        bucket = %bucket,
+        key = %key,
+        object_url = %object_url,
+        "s3 object HEAD response received"
+    );
 
     match response.status() {
         StatusCode::OK => Ok(true),
         StatusCode::NOT_FOUND => Ok(false),
-        StatusCode::FORBIDDEN => Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into()))),
-        status if status.is_server_error() => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(error_code::BAD_GATEWAY.into()),
-        )),
-        _ => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(error_code::BAD_GATEWAY.into()),
-        )),
+        StatusCode::FORBIDDEN => {
+            debug!(
+                bucket = %bucket,
+                key = %key,
+                object_url = %object_url,
+                "s3 object HEAD returned forbidden; continue upload signing as not uploaded"
+            );
+            Ok(false)
+        }
+        status if status.is_server_error() => {
+            warn!(
+                status = status.as_u16(),
+                bucket = %bucket,
+                key = %key,
+                object_url = %object_url,
+                "s3 object HEAD returned server error"
+            );
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            ))
+        }
+        status => {
+            warn!(
+                status = status.as_u16(),
+                bucket = %bucket,
+                key = %key,
+                object_url = %object_url,
+                "s3 object HEAD returned unexpected status"
+            );
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            ))
+        }
     }
 }
 
@@ -402,7 +460,10 @@ fn normalize_object_key_with_bucket<'a>(
 
 fn user_scope_key(user_id: &str, s3: &S3Cfg) -> String {
     let uuid = Uuid::parse_str(user_id).unwrap_or_else(|_| {
-        let salt = s3.user_key_salt.as_deref().unwrap_or("change-me-user-key-salt");
+        let salt = s3
+            .user_key_salt
+            .as_deref()
+            .unwrap_or("change-me-user-key-salt");
         let mut hasher = sha2::Sha256::new();
         use sha2::Digest as _;
         hasher.update(salt.as_bytes());
@@ -410,7 +471,7 @@ fn user_scope_key(user_id: &str, s3: &S3Cfg) -> String {
         hasher.update(user_id.as_bytes());
         let digest = hasher.finalize();
         let mut bytes = [0_u8; 16];
-        bytes.copy_from_slice(&digest[..16]);
+        bytes.copy_from_slice(&digest[.. 16]);
         Uuid::from_bytes(bytes)
     });
     encode_u128(uuid.as_u128())
