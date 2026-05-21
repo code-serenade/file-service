@@ -4,6 +4,7 @@ use axum::{Extension, Json, extract::Query, http::StatusCode};
 use toolcraft_axum_kit::{
     ApiError, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
 };
+use toolcraft_request::{HeaderMap, Request};
 use toolcraft_utils::{presign_get_object, sign_request};
 
 use crate::{
@@ -191,20 +192,43 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         "",
         region,
     );
-    let object_url = format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key);
-    let response = reqwest::Client::new()
-        .head(object_url)
-        .header("Authorization", signed.authorization)
-        .header("x-amz-date", signed.x_amz_date)
-        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
-        .send()
-        .await
+    let mut headers = HeaderMap::new();
+    headers
+        .insert("Authorization", signed.authorization)
         .map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
                 Json(error_code::BAD_GATEWAY.into()),
             )
         })?;
+    headers.insert("x-amz-date", signed.x_amz_date).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )
+    })?;
+    headers
+        .insert("x-amz-content-sha256", signed.x_amz_content_sha256)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+
+    let object_url = format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key);
+    let client = Request::new().map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )
+    })?;
+    let response = client.head(&object_url, Some(headers)).await.map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )
+    })?;
 
     match response.status() {
         StatusCode::OK => Ok(true),
