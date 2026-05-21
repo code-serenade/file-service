@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use axum::{Extension, Json, extract::Query, http::StatusCode};
-use sha2::{Digest, Sha256};
 use toolcraft_axum_kit::{
-    CommonError, CommonResponse, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
+    ApiError, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
 };
 use toolcraft_utils::{presign_get_object, sign_request};
-use uuid::Uuid;
 
 use crate::{
     error::error_code,
@@ -17,18 +15,8 @@ use crate::{
     settings::S3Cfg,
     utils::base62::encode_u128,
 };
+use uuid::Uuid;
 
-#[utoipa::path(
-    get,
-    path = "/upload/avatar",
-    responses(
-        (status = 200, description = "Succeed", body = CommonResponse<UploadSignResponse>),
-        (status = 500, description = "Error", body = CommonError)
-    ),
-    description = "获取头像上传签名",
-    tag = "s3",
-    security(("Bearer" = [])),
-)]
 pub async fn upload_avatar(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
@@ -36,27 +24,12 @@ pub async fn upload_avatar(
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
     let key = format!("avatars/{user_scope}");
     Ok(
-        sign_upload_request(&s3, &s3.public_bucket, &key, None, Some("inline"))
+        sign_upload_request(&s3, &s3.public_bucket, &key, None, Some("inline"), false)
             .into_common_response()
             .to_json(),
     )
 }
 
-#[utoipa::path(
-    get,
-    path = "/upload/image",
-    params(
-        ("ext" = String, Query, description = "图片后缀名，例如：jpg/jpeg/png/webp/gif")
-    ),
-    responses(
-        (status = 200, description = "Succeed", body = CommonResponse<UploadSignResponse>),
-        (status = 400, description = "Invalid params", body = CommonError),
-        (status = 500, description = "Error", body = CommonError)
-    ),
-    description = "获取图片上传签名",
-    tag = "s3",
-    security(("Bearer" = [])),
-)]
 pub async fn upload_image(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
@@ -66,36 +39,26 @@ pub async fn upload_image(
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
     ))?;
+    let filename = normalize_and_validate_sha256_filename(query.filename.as_deref()).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
     let content_type = content_type_for_image_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let object_id = encode_u128(Uuid::new_v4().as_u128());
-    let key = format!("images/{user_scope}/{}.{}", object_id, ext);
+    let key = format!("users/{user_scope}/images/{filename}.{ext}");
+    let already_uploaded = object_exists(&s3, &s3.private_bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
         &s3.private_bucket,
         &key,
         Some(content_type),
         Some("inline"),
+        already_uploaded,
     )
     .into_common_response()
     .to_json())
 }
 
-#[utoipa::path(
-    get,
-    path = "/upload/document",
-    params(
-        ("ext" = String, Query, description = "文档后缀名，例如：pdf/doc/docx/xls/xlsx/txt")
-    ),
-    responses(
-        (status = 200, description = "Succeed", body = CommonResponse<UploadSignResponse>),
-        (status = 400, description = "Invalid params", body = CommonError),
-        (status = 500, description = "Error", body = CommonError)
-    ),
-    description = "获取文档上传签名",
-    tag = "s3",
-    security(("Bearer" = [])),
-)]
 pub async fn upload_document(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
@@ -105,36 +68,26 @@ pub async fn upload_document(
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
     ))?;
+    let filename = normalize_and_validate_sha256_filename(query.filename.as_deref()).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
     let content_type = content_type_for_document_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let object_id = encode_u128(Uuid::new_v4().as_u128());
-    let key = format!("docs/{user_scope}/{}.{}", object_id, ext);
+    let key = format!("users/{user_scope}/docs/{filename}.{ext}");
+    let already_uploaded = object_exists(&s3, &s3.private_bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
         &s3.private_bucket,
         &key,
         Some(content_type),
         Some("inline"),
+        already_uploaded,
     )
     .into_common_response()
     .to_json())
 }
 
-#[utoipa::path(
-    get,
-    path = "/access",
-    params(
-        ("key" = String, Query, description = "对象 key 或完整 URL（仅允许当前用户自己的私有资源）")
-    ),
-    responses(
-        (status = 200, description = "Succeed", body = CommonResponse<DownloadSignResponse>),
-        (status = 403, description = "Forbidden", body = CommonError),
-        (status = 500, description = "Error", body = CommonError)
-    ),
-    description = "获取访问签名（仅当前用户私有资源）",
-    tag = "s3",
-    security(("Bearer" = [])),
-)]
 pub async fn access_sign(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
@@ -157,22 +110,6 @@ pub async fn access_sign(
     )
 }
 
-#[utoipa::path(
-    get,
-    path = "/delete",
-    params(
-        ("key" = String, Query, description = "对象 key 或完整 URL（仅允许删除当前用户资源）")
-    ),
-    responses(
-        (status = 200, description = "Succeed", body = CommonResponse<DeleteSignResponse>),
-        (status = 400, description = "Invalid params", body = CommonError),
-        (status = 403, description = "Forbidden", body = CommonError),
-        (status = 500, description = "Error", body = CommonError)
-    ),
-    description = "获取删除签名（仅当前用户自己的资源）",
-    tag = "s3",
-    security(("Bearer" = [])),
-)]
 pub async fn delete_sign(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
@@ -202,6 +139,7 @@ fn sign_upload_request(
     key: &str,
     content_type: Option<&str>,
     content_disposition: Option<&str>,
+    already_uploaded: bool,
 ) -> UploadSignResponse {
     let host = s3
         .endpoint
@@ -225,6 +163,7 @@ fn sign_upload_request(
         method: "PUT".to_string(),
         upload_url: format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key),
         key: key.to_string(),
+        already_uploaded,
         headers: UploadHeaders {
             authorization: signed.authorization,
             x_amz_date: signed.x_amz_date,
@@ -232,6 +171,53 @@ fn sign_upload_request(
             content_type: content_type.map(ToString::to_string),
             content_disposition: content_disposition.map(ToString::to_string),
         },
+    }
+}
+
+async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiError> {
+    let host = s3
+        .endpoint
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let region = s3.region.as_deref().filter(|v| !v.trim().is_empty());
+
+    let signed = sign_request(
+        "HEAD",
+        &s3.access_key,
+        &s3.secret_key,
+        host,
+        &format!("/{}/{}", bucket, key),
+        "",
+        region,
+    );
+    let object_url = format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key);
+    let response = reqwest::Client::new()
+        .head(object_url)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.x_amz_date)
+        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
+        .send()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+
+    match response.status() {
+        StatusCode::OK => Ok(true),
+        StatusCode::NOT_FOUND => Ok(false),
+        StatusCode::FORBIDDEN => Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into()))),
+        status if status.is_server_error() => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )),
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )),
     }
 }
 
@@ -288,8 +274,8 @@ fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignRespons
 }
 
 fn is_user_owned_private_key(user_scope: &str, key: &str) -> bool {
-    let image_prefix = format!("images/{user_scope}/");
-    let doc_prefix = format!("docs/{user_scope}/");
+    let image_prefix = format!("users/{user_scope}/images/");
+    let doc_prefix = format!("users/{user_scope}/docs/");
     key.starts_with(&image_prefix) || key.starts_with(&doc_prefix)
 }
 
@@ -310,6 +296,21 @@ fn normalize_and_validate_ext(ext: &str, allowed: &[&str]) -> Option<String> {
         return None;
     }
     if allowed.contains(&normalized.as_str()) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn normalize_and_validate_sha256_filename(filename: Option<&str>) -> Option<String> {
+    let normalized = filename?
+        .trim()
+        .trim_end_matches(".sha256")
+        .to_ascii_lowercase();
+    if normalized.len() != 64 {
+        return None;
+    }
+    if normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
         Some(normalized)
     } else {
         None
@@ -376,20 +377,19 @@ fn normalize_object_key_with_bucket<'a>(
 }
 
 fn user_scope_key(user_id: &str, s3: &S3Cfg) -> String {
-    let salt = s3
-        .user_key_salt
-        .as_deref()
-        .unwrap_or("change-me-user-key-salt");
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(b":");
-    hasher.update(user_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut scope = String::with_capacity(32);
-    for b in digest.iter().take(16) {
-        scope.push_str(&format!("{b:02x}"));
-    }
-    scope
+    let uuid = Uuid::parse_str(user_id).unwrap_or_else(|_| {
+        let salt = s3.user_key_salt.as_deref().unwrap_or("change-me-user-key-salt");
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest as _;
+        hasher.update(salt.as_bytes());
+        hasher.update(b":");
+        hasher.update(user_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        Uuid::from_bytes(bytes)
+    });
+    encode_u128(uuid.as_u128())
 }
 
 fn content_type_for_image_ext(ext: &str) -> &'static str {

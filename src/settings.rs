@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use toolcraft_config::load_settings;
-use toolcraft_jwt::VerifyJwt;
+use toolcraft_jwt::{VerifyJwt, VerifyJwtCfg};
 use toolcraft_request::{HeaderMap, Request};
 
 use crate::error::{Error, Result};
@@ -82,11 +82,11 @@ impl JwtVerifyRemoteCfg {
                 payload.code, payload.message
             )));
         }
-        let verifier = VerifyJwt::new(
-            payload.data.public_key_pem,
-            payload.data.issuer,
-            payload.data.audience,
-        )?;
+        let verifier = VerifyJwt::new(VerifyJwtCfg {
+            public_key_pem: payload.data.public_key_pem,
+            issuer: payload.data.issuer,
+            audience: payload.data.audience,
+        })?;
 
         Ok(verifier)
     }
