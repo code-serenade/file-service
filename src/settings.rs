@@ -9,7 +9,11 @@ use crate::error::{Error, Result};
 pub struct Settings {
     pub http: HttpCfg,
     pub jwt_verify: JwtVerifyRemoteCfg,
+    #[serde(default)]
+    pub storage: StorageCfg,
     pub s3: S3Cfg,
+    #[serde(default)]
+    pub r2: Option<S3Cfg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +26,12 @@ pub struct JwtVerifyRemoteCfg {
     pub url: String,
     pub header: String,
     pub token: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct StorageCfg {
+    #[serde(default)]
+    pub user_key_salt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

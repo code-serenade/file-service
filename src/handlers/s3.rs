@@ -146,7 +146,7 @@ fn sign_upload_request(
         .trim_start_matches("https://")
         .trim_start_matches("http://");
 
-    let region = s3.region.as_deref().filter(|v| !v.trim().is_empty());
+    let region = signing_region(s3);
 
     let signed = sign_request(
         "PUT",
@@ -177,6 +177,14 @@ fn s3_api_object_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
     format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key)
 }
 
+fn signing_region(s3: &S3Cfg) -> Option<&str> {
+    s3.region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| (s3.provider == S3Provider::CloudflareR2).then_some("auto"))
+}
+
 fn normalized_public_bucket_url(s3: &S3Cfg) -> Option<&str> {
     s3.public_bucket_url
         .as_deref()
@@ -199,7 +207,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         .trim_end_matches('/')
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    let region = s3.region.as_deref().filter(|v| !v.trim().is_empty());
+    let region = signing_region(s3);
 
     let signed = sign_request(
         "HEAD",
@@ -321,7 +329,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
 }
 
 fn sign_access_request(s3: &S3Cfg, bucket: &str, key: &str) -> DownloadSignResponse {
-    let region = s3.region.as_deref().filter(|v| !v.trim().is_empty());
+    let region = signing_region(s3);
 
     let download_url = presign_get_object(
         &s3.access_key,
@@ -346,7 +354,7 @@ fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignRespons
         .trim_end_matches('/')
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    let region = s3.region.as_deref().filter(|v| !v.trim().is_empty());
+    let region = signing_region(s3);
 
     let signed = sign_request(
         "DELETE",
