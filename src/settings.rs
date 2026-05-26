@@ -40,6 +40,8 @@ struct JwtVerifyConfigData {
 
 #[derive(Debug, Deserialize)]
 pub struct S3Cfg {
+    #[serde(default)]
+    pub provider: S3Provider,
     pub endpoint: String,
     pub public_bucket: String,
     pub private_bucket: String,
@@ -49,6 +51,18 @@ pub struct S3Cfg {
     pub secret_key: String,
     #[serde(default)]
     pub user_key_salt: Option<String>,
+    #[serde(default)]
+    pub public_bucket_url: Option<String>,
+    #[serde(default)]
+    pub private_bucket_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum S3Provider {
+    #[default]
+    S3,
+    CloudflareR2,
 }
 
 impl Settings {

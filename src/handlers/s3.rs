@@ -15,7 +15,7 @@ use crate::{
         AccessSignQuery, DeleteSignQuery, DeleteSignResponse, DownloadSignResponse, UploadExtQuery,
         UploadHeaders, UploadSignResponse,
     },
-    settings::S3Cfg,
+    settings::{S3Cfg, S3Provider},
     utils::base62::encode_u128,
 };
 
@@ -117,13 +117,10 @@ pub async fn delete_sign(
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<DeleteSignQuery>,
 ) -> ResponseResult<DeleteSignResponse> {
-    let (bucket, normalized_key) =
-        normalize_object_key_with_bucket(&query.key, &s3.private_bucket, &s3.public_bucket).ok_or(
-            (
-                StatusCode::BAD_REQUEST,
-                Json(error_code::INVALID_PARAMS.into()),
-            ),
-        )?;
+    let (bucket, normalized_key) = normalize_object_key_with_bucket(&query.key, &s3).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
 
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
     if !is_user_owned_key(&user_scope, &normalized_key) {
@@ -163,7 +160,7 @@ fn sign_upload_request(
 
     UploadSignResponse {
         method: "PUT".to_string(),
-        upload_url: format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key),
+        upload_url: s3_api_object_url(s3, bucket, key),
         key: key.to_string(),
         already_uploaded,
         headers: UploadHeaders {
@@ -174,6 +171,26 @@ fn sign_upload_request(
             content_disposition: content_disposition.map(ToString::to_string),
         },
     }
+}
+
+fn s3_api_object_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
+    format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key)
+}
+
+fn normalized_public_bucket_url(s3: &S3Cfg) -> Option<&str> {
+    s3.public_bucket_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| url.trim_end_matches('/'))
+}
+
+fn normalized_private_bucket_url(s3: &S3Cfg) -> Option<&str> {
+    s3.private_bucket_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| url.trim_end_matches('/'))
 }
 
 async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiError> {
@@ -219,7 +236,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
             )
         })?;
 
-    let object_url = format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key);
+    let object_url = s3_api_object_url(s3, bucket, key);
     debug!(
         endpoint = %s3.endpoint,
         host = %host,
@@ -343,7 +360,7 @@ fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignRespons
 
     DeleteSignResponse {
         method: "DELETE".to_string(),
-        delete_url: format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key),
+        delete_url: s3_api_object_url(s3, bucket, key),
         key: key.to_string(),
         headers: UploadHeaders {
             authorization: signed.authorization,
@@ -419,14 +436,27 @@ fn normalize_object_key(input: &str, private_bucket: &str) -> Option<String> {
     if key.is_empty() { None } else { Some(key) }
 }
 
-fn normalize_object_key_with_bucket<'a>(
-    input: &str,
-    private_bucket: &'a str,
-    public_bucket: &'a str,
-) -> Option<(&'a str, String)> {
+fn normalize_object_key_with_bucket<'a>(input: &str, s3: &'a S3Cfg) -> Option<(&'a str, String)> {
     let raw = input.trim();
     if raw.is_empty() {
         return None;
+    }
+
+    if s3.provider == S3Provider::CloudflareR2 {
+        if let Some(public_bucket_url) = normalized_public_bucket_url(s3) {
+            if let Some(path) = strip_url_base(raw, public_bucket_url) {
+                if !path.is_empty() {
+                    return Some((&s3.public_bucket, path));
+                }
+            }
+        }
+        if let Some(private_bucket_url) = normalized_private_bucket_url(s3) {
+            if let Some(path) = strip_url_base(raw, private_bucket_url) {
+                if !path.is_empty() {
+                    return Some((&s3.private_bucket, path));
+                }
+            }
+        }
     }
 
     let mut path = if let Some((_, after_scheme)) = raw.split_once("://") {
@@ -440,11 +470,11 @@ fn normalize_object_key_with_bucket<'a>(
         raw.trim_start_matches('/').to_string()
     };
 
-    if let Some(stripped) = path.strip_prefix(&format!("{private_bucket}/")) {
-        return Some((private_bucket, stripped.to_string()));
+    if let Some(stripped) = path.strip_prefix(&format!("{}/", s3.private_bucket)) {
+        return Some((&s3.private_bucket, stripped.to_string()));
     }
-    if let Some(stripped) = path.strip_prefix(&format!("{public_bucket}/")) {
-        return Some((public_bucket, stripped.to_string()));
+    if let Some(stripped) = path.strip_prefix(&format!("{}/", s3.public_bucket)) {
+        return Some((&s3.public_bucket, stripped.to_string()));
     }
 
     if path.is_empty() {
@@ -452,10 +482,17 @@ fn normalize_object_key_with_bucket<'a>(
     }
 
     if path.starts_with("avatars/") {
-        Some((public_bucket, path))
+        Some((&s3.public_bucket, path))
     } else {
-        Some((private_bucket, std::mem::take(&mut path)))
+        Some((&s3.private_bucket, std::mem::take(&mut path)))
     }
+}
+
+fn strip_url_base(input: &str, base_url: &str) -> Option<String> {
+    let input = input.trim_end_matches('/');
+    let base_url = base_url.trim_end_matches('/');
+    let stripped = input.strip_prefix(base_url)?;
+    Some(stripped.trim_start_matches('/').to_string())
 }
 
 fn user_scope_key(user_id: &str, s3: &S3Cfg) -> String {
@@ -497,5 +534,78 @@ fn content_type_for_document_ext(ext: &str) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_s3_cfg(provider: S3Provider) -> S3Cfg {
+        S3Cfg {
+            provider,
+            endpoint: "https://example-s3.local".to_string(),
+            public_bucket: "public-bucket".to_string(),
+            private_bucket: "private-bucket".to_string(),
+            region: Some("us-east-1".to_string()),
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            user_key_salt: Some("salt".to_string()),
+            public_bucket_url: None,
+            private_bucket_url: None,
+        }
+    }
+
+    #[test]
+    fn normalize_delete_key_preserves_s3_bucket_paths() {
+        let s3 = test_s3_cfg(S3Provider::S3);
+
+        let (bucket, key) = normalize_object_key_with_bucket(
+            "https://example-s3.local/public-bucket/avatars/u1",
+            &s3,
+        )
+        .expect("public key");
+
+        assert_eq!(bucket, "public-bucket");
+        assert_eq!(key, "avatars/u1");
+    }
+
+    #[test]
+    fn normalize_delete_key_accepts_cloudflare_public_bucket_url() {
+        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        s3.public_bucket_url = Some("https://assets.example.com/".to_string());
+
+        let (bucket, key) =
+            normalize_object_key_with_bucket("https://assets.example.com/avatars/u1", &s3)
+                .expect("public key");
+
+        assert_eq!(bucket, "public-bucket");
+        assert_eq!(key, "avatars/u1");
+    }
+
+    #[test]
+    fn normalize_delete_key_accepts_cloudflare_private_bucket_url() {
+        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        s3.private_bucket_url = Some("https://vault.example.com/".to_string());
+
+        let (bucket, key) = normalize_object_key_with_bucket(
+            "https://vault.example.com/users/u1/images/file.png",
+            &s3,
+        )
+        .expect("private key");
+
+        assert_eq!(bucket, "private-bucket");
+        assert_eq!(key, "users/u1/images/file.png");
+    }
+
+    #[test]
+    fn cloudflare_upload_url_still_uses_s3_api_endpoint() {
+        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        s3.public_bucket_url = Some("https://assets.example.com".to_string());
+
+        assert_eq!(
+            s3_api_object_url(&s3, &s3.public_bucket, "avatars/u1"),
+            "https://example-s3.local/public-bucket/avatars/u1"
+        );
     }
 }
