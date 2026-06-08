@@ -45,9 +45,9 @@ pub fn decode_to_u64(input: &str) -> Option<u64> {
     let mut result: u64 = 0;
     for ch in input.bytes() {
         let digit = match ch {
-            b'0'..=b'9' => (ch - b'0') as u64,
-            b'A'..=b'Z' => (ch - b'A' + 10) as u64,
-            b'a'..=b'z' => (ch - b'a' + 36) as u64,
+            b'0' ..= b'9' => (ch - b'0') as u64,
+            b'A' ..= b'Z' => (ch - b'A' + 10) as u64,
+            b'a' ..= b'z' => (ch - b'a' + 36) as u64,
             _ => return None,
         };
         result = result.checked_mul(62)?;
@@ -58,7 +58,7 @@ pub fn decode_to_u64(input: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_to_u64, encode_u128, encode_u64};
+    use super::{decode_to_u64, encode_u64, encode_u128};
 
     #[test]
     fn test_encode_decode_zero() {

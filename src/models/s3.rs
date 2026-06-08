@@ -11,6 +11,11 @@ pub struct DeleteSignQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UploadAvatarQuery {
+    pub ext: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UploadExtQuery {
     pub ext: String,
     pub filename: Option<String>,
@@ -30,6 +35,15 @@ pub struct UploadSignResponse {
     pub key: String,
     pub already_uploaded: bool,
     pub headers: UploadHeaders,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerUploadResponse {
+    pub key: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: usize,
+    pub already_uploaded: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
