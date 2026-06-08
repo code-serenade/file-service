@@ -614,7 +614,6 @@ name = "file-service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "reqwest",
  "serde",
  "sha2 0.11.0",
  "thiserror",
@@ -2541,9 +2540,9 @@ dependencies = [
 
 [[package]]
 name = "toolcraft-request"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c2fcfe0a67feeed9b6d329d52c948c4994902f148ff73a5f443741299e096f1"
+checksum = "31f2ed949450955325bef216d38544bddc1b253c2bba32da811edebb6407a120"
 dependencies = [
  "bytes",
  "futures-util",

@@ -6,7 +6,6 @@ use axum::{
     extract::Query,
     http::{HeaderMap as AxumHeaderMap, StatusCode, header},
 };
-use reqwest::Client;
 use sha2::Digest;
 use toolcraft_axum_kit::{
     ApiError, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
@@ -256,15 +255,56 @@ async fn put_object_to_s3(
     );
 
     let object_url = s3_api_object_url(s3, bucket, key);
-    let response = Client::new()
-        .put(&object_url)
-        .header(header::AUTHORIZATION, signed.authorization)
-        .header("x-amz-date", signed.x_amz_date)
-        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_DISPOSITION, "inline")
-        .body(body)
-        .send()
+    let mut headers = HeaderMap::new();
+    headers
+        .insert("Authorization", signed.authorization)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+    headers
+        .insert("x-amz-date", signed.x_amz_date)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+    headers
+        .insert("x-amz-content-sha256", signed.x_amz_content_sha256)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+    headers
+        .insert("Content-Type", content_type.to_string())
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+    headers
+        .insert("Content-Disposition", "inline".to_string())
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })?;
+
+    let client = Request::new().map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error_code::BAD_GATEWAY.into()),
+        )
+    })?;
+    let response = client
+        .put_bytes(&object_url, body, Some(headers))
         .await
         .map_err(|err| {
             warn!(
