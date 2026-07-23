@@ -12,6 +12,8 @@ user_key_salt = "please-change-to-random-long-string"
 [s3]
 provider = "s3"
 endpoint = "http://127.0.0.1:9000"
+# Optional. File-service uses this for its own HEAD/PUT requests; clients still receive `endpoint`.
+internal_endpoint = "http://127.0.0.1:9000"
 public_bucket = "test-public-bucket"
 private_bucket = "test-private-bucket"
 region = "us-east-1"

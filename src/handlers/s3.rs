@@ -242,7 +242,8 @@ async fn put_object_to_s3(
     content_type: &str,
     body: Bytes,
 ) -> Result<(), ApiError> {
-    let host = s3_host(s3);
+    let endpoint = internal_s3_endpoint(s3);
+    let host = s3_host(endpoint);
     let region = signing_region(s3);
     let signed = sign_request(
         "PUT",
@@ -254,7 +255,7 @@ async fn put_object_to_s3(
         region,
     );
 
-    let object_url = s3_api_object_url(s3, bucket, key);
+    let object_url = s3_api_object_url(endpoint, bucket, key);
     let mut headers = HeaderMap::new();
     headers
         .insert("Authorization", signed.authorization)
@@ -345,7 +346,7 @@ fn sign_upload_request(
     content_disposition: Option<&str>,
     already_uploaded: bool,
 ) -> UploadSignResponse {
-    let host = s3_host(s3);
+    let host = s3_host(&s3.endpoint);
 
     let region = signing_region(s3);
 
@@ -361,7 +362,7 @@ fn sign_upload_request(
 
     UploadSignResponse {
         method: "PUT".to_string(),
-        upload_url: s3_api_object_url(s3, bucket, key),
+        upload_url: s3_api_object_url(&s3.endpoint, bucket, key),
         key: key.to_string(),
         already_uploaded,
         headers: UploadHeaders {
@@ -374,16 +375,24 @@ fn sign_upload_request(
     }
 }
 
-fn s3_host(s3: &S3Cfg) -> String {
-    s3.endpoint
+fn internal_s3_endpoint(s3: &S3Cfg) -> &str {
+    s3.internal_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or(&s3.endpoint)
+}
+
+fn s3_host(endpoint: &str) -> String {
+    endpoint
         .trim_end_matches('/')
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .to_string()
 }
 
-fn s3_api_object_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
-    format!("{}/{}/{}", s3.endpoint.trim_end_matches('/'), bucket, key)
+fn s3_api_object_url(endpoint: &str, bucket: &str, key: &str) -> String {
+    format!("{}/{}/{}", endpoint.trim_end_matches('/'), bucket, key)
 }
 
 fn object_public_or_api_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
@@ -397,7 +406,7 @@ fn object_public_or_api_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
             return format!("{}/{}", private_bucket_url, key);
         }
     }
-    s3_api_object_url(s3, bucket, key)
+    s3_api_object_url(&s3.endpoint, bucket, key)
 }
 
 fn signing_region(s3: &S3Cfg) -> Option<&str> {
@@ -425,7 +434,8 @@ fn normalized_private_bucket_url(s3: &S3Cfg) -> Option<&str> {
 }
 
 async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiError> {
-    let host = s3_host(s3);
+    let endpoint = internal_s3_endpoint(s3);
+    let host = s3_host(endpoint);
     let region = signing_region(s3);
 
     let signed = sign_request(
@@ -463,9 +473,9 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
             )
         })?;
 
-    let object_url = s3_api_object_url(s3, bucket, key);
+    let object_url = s3_api_object_url(endpoint, bucket, key);
     debug!(
-        endpoint = %s3.endpoint,
+        endpoint = %endpoint,
         host = %host,
         region = ?region,
         bucket = %bucket,
@@ -568,7 +578,7 @@ fn sign_access_request(s3: &S3Cfg, bucket: &str, key: &str) -> DownloadSignRespo
 }
 
 fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignResponse {
-    let host = s3_host(s3);
+    let host = s3_host(&s3.endpoint);
     let region = signing_region(s3);
 
     let signed = sign_request(
@@ -583,7 +593,7 @@ fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignRespons
 
     DeleteSignResponse {
         method: "DELETE".to_string(),
-        delete_url: s3_api_object_url(s3, bucket, key),
+        delete_url: s3_api_object_url(&s3.endpoint, bucket, key),
         key: key.to_string(),
         headers: UploadHeaders {
             authorization: signed.authorization,
@@ -853,6 +863,7 @@ mod tests {
         S3Cfg {
             provider,
             endpoint: "https://example-s3.local".to_string(),
+            internal_endpoint: None,
             public_bucket: "public-bucket".to_string(),
             private_bucket: "private-bucket".to_string(),
             region: Some("us-east-1".to_string()),
@@ -912,8 +923,25 @@ mod tests {
         s3.public_bucket_url = Some("https://assets.example.com".to_string());
 
         assert_eq!(
-            s3_api_object_url(&s3, &s3.public_bucket, "avatars/u1"),
+            s3_api_object_url(&s3.endpoint, &s3.public_bucket, "avatars/u1"),
             "https://example-s3.local/public-bucket/avatars/u1"
+        );
+    }
+
+    #[test]
+    fn internal_s3_endpoint_only_applies_to_service_requests() {
+        let mut s3 = test_s3_cfg(S3Provider::S3);
+        s3.internal_endpoint = Some("http://127.0.0.1:29999/".to_string());
+
+        assert_eq!(internal_s3_endpoint(&s3), "http://127.0.0.1:29999/");
+        assert_eq!(s3_host(internal_s3_endpoint(&s3)), "127.0.0.1:29999");
+        assert_eq!(
+            s3_api_object_url(internal_s3_endpoint(&s3), "private-bucket", "image.png"),
+            "http://127.0.0.1:29999/private-bucket/image.png"
+        );
+        assert_eq!(
+            s3_api_object_url(&s3.endpoint, "private-bucket", "image.png"),
+            "https://example-s3.local/private-bucket/image.png"
         );
     }
 

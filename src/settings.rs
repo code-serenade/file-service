@@ -52,7 +52,12 @@ struct JwtVerifyConfigData {
 pub struct S3Cfg {
     #[serde(default)]
     pub provider: S3Provider,
+    /// Browser-facing endpoint used when returning signed URLs to clients.
     pub endpoint: String,
+    /// Optional endpoint for file-service's own S3 API requests.
+    /// Falls back to `endpoint` to keep existing configurations compatible.
+    #[serde(default)]
+    pub internal_endpoint: Option<String>,
     pub public_bucket: String,
     pub private_bucket: String,
     #[serde(default)]
