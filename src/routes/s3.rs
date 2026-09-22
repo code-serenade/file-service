@@ -1,8 +1,8 @@
-use axum::{Router, routing::get};
+use axum::{Router, extract::DefaultBodyLimit, routing::get};
 
 use crate::handlers::s3::{
-    access_sign, delete_sign, put_upload_avatar, put_upload_document, put_upload_image,
-    upload_avatar, upload_document, upload_image,
+    MAX_UPLOAD_BYTES, access_sign, delete_sign, put_upload_avatar, put_upload_document,
+    put_upload_image, put_upload_media, upload_avatar, upload_document, upload_image, upload_media,
 };
 
 pub fn s3_routes() -> Router {
@@ -13,6 +13,8 @@ pub fn s3_routes() -> Router {
             "/upload/document",
             get(upload_document).put(put_upload_document),
         )
+        .route("/upload/media", get(upload_media).put(put_upload_media))
         .route("/access", get(access_sign))
         .route("/delete", get(delete_sign))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }

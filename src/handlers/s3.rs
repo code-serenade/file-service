@@ -6,6 +6,8 @@ use axum::{
     extract::Query,
     http::{HeaderMap as AxumHeaderMap, StatusCode, header},
 };
+use chrono::Utc;
+use hmac::{Hmac, Mac};
 use sha2::Digest;
 use toolcraft_axum_kit::{
     ApiError, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
@@ -21,18 +23,24 @@ use crate::{
         AccessSignQuery, DeleteSignQuery, DeleteSignResponse, DownloadSignResponse,
         ServerUploadResponse, UploadAvatarQuery, UploadExtQuery, UploadHeaders, UploadSignResponse,
     },
-    settings::{S3Cfg, S3Provider},
+    settings::{ReadPolicy, S3AddressingStyle, S3Cfg, S3Provider, StorageBucketCfg},
     utils::base62::encode_u128,
 };
+
+const AVATAR_BUCKET_ID: &str = "avatar";
+const IMAGE_BUCKET_ID: &str = "image";
+const DOCUMENT_BUCKET_ID: &str = "document";
+const MEDIA_BUCKET_ID: &str = "media";
 
 pub async fn upload_avatar(
     Extension(auth_user): Extension<AuthUser>,
     Extension(s3): Extension<Arc<S3Cfg>>,
 ) -> ResponseResult<UploadSignResponse> {
+    let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID)?;
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("avatars/{user_scope}");
+    let key = avatar_key(bucket, &user_scope);
     Ok(
-        sign_upload_request(&s3, &s3.public_bucket, &key, None, Some("inline"), false)
+        sign_upload_request(&s3, bucket, &key, None, Some("inline"), false)
             .into_common_response()
             .to_json(),
     )
@@ -43,6 +51,7 @@ pub async fn upload_image(
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<UploadExtQuery>,
 ) -> ResponseResult<UploadSignResponse> {
+    let bucket = storage_bucket(&s3, IMAGE_BUCKET_ID)?;
     let ext = normalize_and_validate_ext(&query.ext, IMAGE_ALLOWED_EXTS).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
@@ -53,11 +62,11 @@ pub async fn upload_image(
     ))?;
     let content_type = content_type_for_image_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("users/{user_scope}/images/{filename}.{ext}");
-    let already_uploaded = object_exists(&s3, &s3.private_bucket, &key).await?;
+    let key = image_key(bucket, &user_scope, &filename, &ext);
+    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
-        &s3.private_bucket,
+        bucket,
         &key,
         Some(content_type),
         Some("inline"),
@@ -72,6 +81,7 @@ pub async fn upload_document(
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<UploadExtQuery>,
 ) -> ResponseResult<UploadSignResponse> {
+    let bucket = storage_bucket(&s3, DOCUMENT_BUCKET_ID)?;
     let ext = normalize_and_validate_ext(&query.ext, DOCUMENT_ALLOWED_EXTS).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
@@ -82,11 +92,41 @@ pub async fn upload_document(
     ))?;
     let content_type = content_type_for_document_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("users/{user_scope}/docs/{filename}.{ext}");
-    let already_uploaded = object_exists(&s3, &s3.private_bucket, &key).await?;
+    let key = document_key(bucket, &user_scope, &filename, &ext);
+    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
-        &s3.private_bucket,
+        bucket,
+        &key,
+        Some(content_type),
+        Some("inline"),
+        already_uploaded,
+    )
+    .into_common_response()
+    .to_json())
+}
+
+pub async fn upload_media(
+    Extension(auth_user): Extension<AuthUser>,
+    Extension(s3): Extension<Arc<S3Cfg>>,
+    Query(query): Query<UploadExtQuery>,
+) -> ResponseResult<UploadSignResponse> {
+    let bucket = storage_bucket(&s3, MEDIA_BUCKET_ID)?;
+    let ext = normalize_and_validate_ext(&query.ext, MEDIA_ALLOWED_EXTS).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
+    let filename = normalize_and_validate_sha256_filename(query.filename.as_deref()).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
+    let content_type = content_type_for_media_ext(&ext);
+    let user_scope = user_scope_key(&auth_user.user_id, &s3);
+    let key = media_key(bucket, &user_scope, &filename, &ext);
+    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
+    Ok(sign_upload_request(
+        &s3,
+        bucket,
         &key,
         Some(content_type),
         Some("inline"),
@@ -103,6 +143,7 @@ pub async fn put_upload_avatar(
     headers: AxumHeaderMap,
     body: Bytes,
 ) -> ResponseResult<ServerUploadResponse> {
+    let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID)?;
     let ext = normalize_and_validate_ext(&query.ext, IMAGE_ALLOWED_EXTS).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
@@ -114,8 +155,8 @@ pub async fn put_upload_avatar(
     validate_request_content_type(&headers, content_type)?;
 
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("avatars/{user_scope}");
-    server_upload_object(&s3, &s3.public_bucket, &key, content_type, &body, false).await
+    let key = avatar_key(bucket, &user_scope);
+    server_upload_object(&s3, bucket, &key, content_type, &body, false).await
 }
 
 pub async fn put_upload_image(
@@ -125,6 +166,7 @@ pub async fn put_upload_image(
     headers: AxumHeaderMap,
     body: Bytes,
 ) -> ResponseResult<ServerUploadResponse> {
+    let bucket = storage_bucket(&s3, IMAGE_BUCKET_ID)?;
     let ext = normalize_and_validate_ext(&query.ext, IMAGE_ALLOWED_EXTS).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
@@ -137,8 +179,8 @@ pub async fn put_upload_image(
 
     let hash = sha256_hex(&body);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("users/{user_scope}/images/{hash}.{ext}");
-    server_upload_object(&s3, &s3.private_bucket, &key, content_type, &body, true).await
+    let key = image_key(bucket, &user_scope, &hash, &ext);
+    server_upload_object(&s3, bucket, &key, content_type, &body, true).await
 }
 
 pub async fn put_upload_document(
@@ -148,6 +190,7 @@ pub async fn put_upload_document(
     headers: AxumHeaderMap,
     body: Bytes,
 ) -> ResponseResult<ServerUploadResponse> {
+    let bucket = storage_bucket(&s3, DOCUMENT_BUCKET_ID)?;
     let ext = normalize_and_validate_ext(&query.ext, DOCUMENT_ALLOWED_EXTS).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
@@ -160,8 +203,32 @@ pub async fn put_upload_document(
 
     let hash = sha256_hex(&body);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    let key = format!("users/{user_scope}/docs/{hash}.{ext}");
-    server_upload_object(&s3, &s3.private_bucket, &key, content_type, &body, true).await
+    let key = document_key(bucket, &user_scope, &hash, &ext);
+    server_upload_object(&s3, bucket, &key, content_type, &body, true).await
+}
+
+pub async fn put_upload_media(
+    Extension(auth_user): Extension<AuthUser>,
+    Extension(s3): Extension<Arc<S3Cfg>>,
+    Query(query): Query<UploadExtQuery>,
+    headers: AxumHeaderMap,
+    body: Bytes,
+) -> ResponseResult<ServerUploadResponse> {
+    let bucket = storage_bucket(&s3, MEDIA_BUCKET_ID)?;
+    let ext = normalize_and_validate_ext(&query.ext, MEDIA_ALLOWED_EXTS).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(error_code::INVALID_PARAMS.into()),
+    ))?;
+    validate_upload_body(&body)?;
+    validate_media_payload(&ext, &body)?;
+
+    let content_type = content_type_for_media_ext(&ext);
+    validate_request_content_type(&headers, content_type)?;
+
+    let hash = sha256_hex(&body);
+    let user_scope = user_scope_key(&auth_user.user_id, &s3);
+    let key = media_key(bucket, &user_scope, &hash, &ext);
+    server_upload_object(&s3, bucket, &key, content_type, &body, true).await
 }
 
 pub async fn access_sign(
@@ -169,21 +236,30 @@ pub async fn access_sign(
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<AccessSignQuery>,
 ) -> ResponseResult<DownloadSignResponse> {
-    let normalized_key = normalize_object_key(&query.key, &s3.private_bucket).ok_or((
+    let bucket_id = requested_bucket_id(&s3, query.bucket_id.as_deref(), &query.key)?;
+    let bucket = storage_bucket(&s3, &bucket_id)?;
+    let normalized_key = normalize_object_key(&query.key, &s3, bucket).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
     ))?;
 
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    if !is_user_owned_private_key(&user_scope, &normalized_key) {
+    if !is_user_owned_key(&bucket_id, bucket, &user_scope, &normalized_key) {
         return Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into())));
     }
 
-    Ok(
-        sign_access_request(&s3, &s3.private_bucket, &normalized_key)
-            .into_common_response()
-            .to_json(),
-    )
+    let response = if bucket.read_policy == ReadPolicy::Public {
+        DownloadSignResponse {
+            bucket_id: bucket_id.clone(),
+            method: "GET".to_string(),
+            download_url: s3_target(&s3, &s3.endpoint, &bucket.bucket, &normalized_key).url,
+            key: normalized_key,
+        }
+    } else {
+        sign_access_request(&s3, &bucket_id, &bucket.bucket, &normalized_key)
+    };
+
+    Ok(response.into_common_response().to_json())
 }
 
 pub async fn delete_sign(
@@ -191,42 +267,47 @@ pub async fn delete_sign(
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<DeleteSignQuery>,
 ) -> ResponseResult<DeleteSignResponse> {
-    let (bucket, normalized_key) = normalize_object_key_with_bucket(&query.key, &s3).ok_or((
+    let bucket_id = requested_bucket_id(&s3, query.bucket_id.as_deref(), &query.key)?;
+    let bucket = storage_bucket(&s3, &bucket_id)?;
+    let normalized_key = normalize_object_key(&query.key, &s3, bucket).ok_or((
         StatusCode::BAD_REQUEST,
         Json(error_code::INVALID_PARAMS.into()),
     ))?;
 
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    if !is_user_owned_key(&user_scope, &normalized_key) {
+    if !is_user_owned_key(&bucket_id, bucket, &user_scope, &normalized_key) {
         return Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into())));
     }
 
-    Ok(sign_delete_request(&s3, bucket, &normalized_key)
-        .into_common_response()
-        .to_json())
+    Ok(
+        sign_delete_request(&s3, &bucket_id, &bucket.bucket, &normalized_key)
+            .into_common_response()
+            .to_json(),
+    )
 }
 
 async fn server_upload_object(
     s3: &S3Cfg,
-    bucket: &str,
+    bucket: &StorageBucketCfg,
     key: &str,
     content_type: &str,
     body: &Bytes,
     check_existing: bool,
 ) -> ResponseResult<ServerUploadResponse> {
     let already_uploaded = if check_existing {
-        object_exists(s3, bucket, key).await?
+        object_exists(s3, &bucket.bucket, key).await?
     } else {
         false
     };
 
     if !already_uploaded {
-        put_object_to_s3(s3, bucket, key, content_type, body.clone()).await?;
+        put_object_to_s3(s3, &bucket.bucket, key, content_type, body.clone()).await?;
     }
 
     Ok(ServerUploadResponse {
+        bucket_id: bucket.id.clone(),
         key: key.to_string(),
-        url: object_public_or_api_url(s3, bucket, key),
+        url: s3_target(s3, &s3.endpoint, &bucket.bucket, key).url,
         sha256: sha256_hex(body),
         size: body.len(),
         already_uploaded,
@@ -243,19 +324,19 @@ async fn put_object_to_s3(
     body: Bytes,
 ) -> Result<(), ApiError> {
     let endpoint = internal_s3_endpoint(s3);
-    let host = s3_host(endpoint);
+    let target = s3_target(s3, endpoint, bucket, key);
     let region = signing_region(s3);
     let signed = sign_request(
         "PUT",
         &s3.access_key,
         &s3.secret_key,
-        &host,
-        &format!("/{}/{}", bucket, key),
+        &target.host,
+        &target.path,
         "",
         region,
     );
 
-    let object_url = s3_api_object_url(endpoint, bucket, key);
+    let object_url = target.url;
     let mut headers = HeaderMap::new();
     headers
         .insert("Authorization", signed.authorization)
@@ -340,13 +421,13 @@ async fn put_object_to_s3(
 
 fn sign_upload_request(
     s3: &S3Cfg,
-    bucket: &str,
+    bucket: &StorageBucketCfg,
     key: &str,
     content_type: Option<&str>,
     content_disposition: Option<&str>,
     already_uploaded: bool,
 ) -> UploadSignResponse {
-    let host = s3_host(&s3.endpoint);
+    let target = s3_target(s3, &s3.endpoint, &bucket.bucket, key);
 
     let region = signing_region(s3);
 
@@ -354,15 +435,16 @@ fn sign_upload_request(
         "PUT",
         &s3.access_key,
         &s3.secret_key,
-        &host,
-        &format!("/{}/{}", bucket, key),
+        &target.host,
+        &target.path,
         "",
         region,
     );
 
     UploadSignResponse {
+        bucket_id: bucket.id.clone(),
         method: "PUT".to_string(),
-        upload_url: s3_api_object_url(&s3.endpoint, bucket, key),
+        upload_url: target.url,
         key: key.to_string(),
         already_uploaded,
         headers: UploadHeaders {
@@ -391,22 +473,123 @@ fn s3_host(endpoint: &str) -> String {
         .to_string()
 }
 
-fn s3_api_object_url(endpoint: &str, bucket: &str, key: &str) -> String {
-    format!("{}/{}/{}", endpoint.trim_end_matches('/'), bucket, key)
+struct S3Target {
+    url: String,
+    host: String,
+    path: String,
 }
 
-fn object_public_or_api_url(s3: &S3Cfg, bucket: &str, key: &str) -> String {
-    if bucket == s3.public_bucket {
-        if let Some(public_bucket_url) = normalized_public_bucket_url(s3) {
-            return format!("{}/{}", public_bucket_url, key);
+fn s3_target(s3: &S3Cfg, endpoint: &str, bucket: &str, key: &str) -> S3Target {
+    let endpoint = endpoint.trim_end_matches('/');
+    let key = key.trim_start_matches('/');
+    if s3.addressing_style == S3AddressingStyle::VirtualHost {
+        let (scheme, host) = endpoint.split_once("://").unwrap_or(("https", endpoint));
+        let host = format!("{bucket}.{host}");
+        return S3Target {
+            url: format!("{scheme}://{host}/{key}"),
+            host,
+            path: format!("/{key}"),
+        };
+    }
+
+    S3Target {
+        url: format!("{endpoint}/{bucket}/{key}"),
+        host: s3_host(endpoint),
+        path: format!("/{bucket}/{key}"),
+    }
+}
+
+fn storage_bucket<'a>(s3: &'a S3Cfg, bucket_id: &str) -> Result<&'a StorageBucketCfg, ApiError> {
+    s3.buckets
+        .iter()
+        .find(|bucket| bucket.id == bucket_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error_code::BAD_GATEWAY.into()),
+            )
+        })
+}
+
+fn requested_bucket_id(
+    s3: &S3Cfg,
+    requested_bucket_id: Option<&str>,
+    key: &str,
+) -> Result<String, ApiError> {
+    if let Some(bucket_id) = requested_bucket_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return Ok(bucket_id.to_string());
+    }
+
+    let mut matches = Vec::new();
+    for bucket_id in [
+        AVATAR_BUCKET_ID,
+        IMAGE_BUCKET_ID,
+        DOCUMENT_BUCKET_ID,
+        MEDIA_BUCKET_ID,
+    ] {
+        let Ok(bucket) = storage_bucket(s3, bucket_id) else {
+            continue;
+        };
+        let Some(normalized_key) = normalize_object_key(key, s3, bucket) else {
+            continue;
+        };
+        if key_matches_bucket_id(bucket_id, bucket, &normalized_key) {
+            matches.push(bucket_id);
         }
     }
-    if bucket == s3.private_bucket {
-        if let Some(private_bucket_url) = normalized_private_bucket_url(s3) {
-            return format!("{}/{}", private_bucket_url, key);
-        }
+
+    if matches.len() == 1 {
+        Ok(matches[0].to_string())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(error_code::INVALID_PARAMS.into()),
+        ))
     }
-    s3_api_object_url(&s3.endpoint, bucket, key)
+}
+
+fn key_with_prefix(bucket: &StorageBucketCfg, suffix: &str) -> String {
+    let prefix = bucket.key_prefix.trim_matches('/');
+    let suffix = suffix.trim_start_matches('/');
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{prefix}/{suffix}")
+    }
+}
+
+fn avatar_key(bucket: &StorageBucketCfg, user_scope: &str) -> String {
+    key_with_prefix(bucket, user_scope)
+}
+
+fn image_key(bucket: &StorageBucketCfg, user_scope: &str, hash: &str, ext: &str) -> String {
+    key_with_prefix(bucket, &format!("{user_scope}/images/{hash}.{ext}"))
+}
+
+fn document_key(bucket: &StorageBucketCfg, user_scope: &str, hash: &str, ext: &str) -> String {
+    key_with_prefix(bucket, &format!("{user_scope}/docs/{hash}.{ext}"))
+}
+
+fn media_key(bucket: &StorageBucketCfg, user_scope: &str, hash: &str, ext: &str) -> String {
+    key_with_prefix(bucket, &format!("{user_scope}/media/{hash}.{ext}"))
+}
+
+fn key_matches_bucket_id(bucket_id: &str, bucket: &StorageBucketCfg, key: &str) -> bool {
+    let prefix = bucket.key_prefix.trim_matches('/');
+    let suffix = key
+        .strip_prefix(prefix)
+        .unwrap_or(key)
+        .trim_start_matches('/');
+    match bucket_id {
+        AVATAR_BUCKET_ID => !suffix.is_empty() && !suffix.contains('/'),
+        IMAGE_BUCKET_ID => suffix.contains("/images/"),
+        DOCUMENT_BUCKET_ID => suffix.contains("/docs/"),
+        MEDIA_BUCKET_ID => suffix.contains("/media/"),
+        _ => false,
+    }
 }
 
 fn signing_region(s3: &S3Cfg) -> Option<&str> {
@@ -417,33 +600,17 @@ fn signing_region(s3: &S3Cfg) -> Option<&str> {
         .or_else(|| (s3.provider == S3Provider::CloudflareR2).then_some("auto"))
 }
 
-fn normalized_public_bucket_url(s3: &S3Cfg) -> Option<&str> {
-    s3.public_bucket_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(|url| url.trim_end_matches('/'))
-}
-
-fn normalized_private_bucket_url(s3: &S3Cfg) -> Option<&str> {
-    s3.private_bucket_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(|url| url.trim_end_matches('/'))
-}
-
 async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiError> {
     let endpoint = internal_s3_endpoint(s3);
-    let host = s3_host(endpoint);
+    let target = s3_target(s3, endpoint, bucket, key);
     let region = signing_region(s3);
 
     let signed = sign_request(
         "HEAD",
         &s3.access_key,
         &s3.secret_key,
-        &host,
-        &format!("/{}/{}", bucket, key),
+        &target.host,
+        &target.path,
         "",
         region,
     );
@@ -473,10 +640,10 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
             )
         })?;
 
-    let object_url = s3_api_object_url(endpoint, bucket, key);
+    let object_url = target.url;
     debug!(
         endpoint = %endpoint,
-        host = %host,
+        host = %target.host,
         region = ?region,
         bucket = %bucket,
         key = %key,
@@ -557,43 +724,116 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
     }
 }
 
-fn sign_access_request(s3: &S3Cfg, bucket: &str, key: &str) -> DownloadSignResponse {
+fn sign_access_request(
+    s3: &S3Cfg,
+    bucket_id: &str,
+    bucket: &str,
+    key: &str,
+) -> DownloadSignResponse {
     let region = signing_region(s3);
 
-    let download_url = presign_get_object(
-        &s3.access_key,
-        &s3.secret_key,
-        bucket,
-        key,
-        region,
-        &s3.endpoint,
-        Some(600),
-    );
+    let download_url = if s3.addressing_style == S3AddressingStyle::VirtualHost {
+        presign_virtual_get(s3, bucket, key, region.unwrap_or("us-east-1"), 600)
+    } else {
+        presign_get_object(
+            &s3.access_key,
+            &s3.secret_key,
+            bucket,
+            key,
+            region,
+            &s3.endpoint,
+            Some(600),
+        )
+    };
 
     DownloadSignResponse {
+        bucket_id: bucket_id.to_string(),
         method: "GET".to_string(),
         download_url,
         key: key.to_string(),
     }
 }
 
-fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignResponse {
-    let host = s3_host(&s3.endpoint);
+fn presign_virtual_get(
+    s3: &S3Cfg,
+    bucket: &str,
+    key: &str,
+    region: &str,
+    expires_secs: u64,
+) -> String {
+    let target = s3_target(s3, &s3.endpoint, bucket, key);
+    let now = Utc::now();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let credential = format!(
+        "{}/{}/{}/s3/aws4_request",
+        s3.access_key, date_stamp, region
+    );
+    let query = format!(
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={}&X-Amz-Expires={}&\
+         X-Amz-SignedHeaders=host",
+        percent_encode(&credential),
+        amz_date,
+        expires_secs,
+    );
+    let canonical_request = format!(
+        "GET\n{}\n{}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
+        target.path, query, target.host
+    );
+    let scope = format!("{date_stamp}/{region}/s3/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex_10(canonical_request.as_bytes())
+    );
+    let date_key = hmac_sha256(format!("AWS4{}", s3.secret_key).as_bytes(), &date_stamp);
+    let region_key = hmac_sha256(&date_key, region);
+    let service_key = hmac_sha256(&region_key, "s3");
+    let signing_key = hmac_sha256(&service_key, "aws4_request");
+    let signature = hex::encode(hmac_sha256(&signing_key, &string_to_sign));
+    format!("{}?{}&X-Amz-Signature={signature}", target.url, query)
+}
+
+fn hmac_sha256(key: &[u8], value: &str) -> Vec<u8> {
+    let mut mac = Hmac::<sha2_10::Sha256>::new_from_slice(key).expect("valid HMAC key");
+    mac.update(value.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn sha256_hex_10(value: &[u8]) -> String {
+    use sha2_10::Digest as _;
+    hex::encode(sha2_10::Sha256::digest(value))
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A' ..= b'Z' | b'a' ..= b'z' | b'0' ..= b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+fn sign_delete_request(s3: &S3Cfg, bucket_id: &str, bucket: &str, key: &str) -> DeleteSignResponse {
+    let target = s3_target(s3, &s3.endpoint, bucket, key);
     let region = signing_region(s3);
 
     let signed = sign_request(
         "DELETE",
         &s3.access_key,
         &s3.secret_key,
-        &host,
-        &format!("/{}/{}", bucket, key),
+        &target.host,
+        &target.path,
         "",
         region,
     );
 
     DeleteSignResponse {
+        bucket_id: bucket_id.to_string(),
         method: "DELETE".to_string(),
-        delete_url: s3_api_object_url(&s3.endpoint, bucket, key),
+        delete_url: target.url,
         key: key.to_string(),
         headers: UploadHeaders {
             authorization: signed.authorization,
@@ -605,23 +845,31 @@ fn sign_delete_request(s3: &S3Cfg, bucket: &str, key: &str) -> DeleteSignRespons
     }
 }
 
-fn is_user_owned_private_key(user_scope: &str, key: &str) -> bool {
-    let image_prefix = format!("users/{user_scope}/images/");
-    let doc_prefix = format!("users/{user_scope}/docs/");
-    key.starts_with(&image_prefix) || key.starts_with(&doc_prefix)
-}
-
-fn is_user_owned_key(user_scope: &str, key: &str) -> bool {
-    let avatar_key = format!("avatars/{user_scope}");
-    if key == avatar_key {
-        return true;
+fn is_user_owned_key(
+    bucket_id: &str,
+    bucket: &StorageBucketCfg,
+    user_scope: &str,
+    key: &str,
+) -> bool {
+    match bucket_id {
+        AVATAR_BUCKET_ID => key == avatar_key(bucket, user_scope),
+        IMAGE_BUCKET_ID => {
+            key.starts_with(&key_with_prefix(bucket, &format!("{user_scope}/images/")))
+        }
+        DOCUMENT_BUCKET_ID => {
+            key.starts_with(&key_with_prefix(bucket, &format!("{user_scope}/docs/")))
+        }
+        MEDIA_BUCKET_ID => {
+            key.starts_with(&key_with_prefix(bucket, &format!("{user_scope}/media/")))
+        }
+        _ => false,
     }
-    is_user_owned_private_key(user_scope, key)
 }
 
 const IMAGE_ALLOWED_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
 const DOCUMENT_ALLOWED_EXTS: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "txt", "md"];
-const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+const MEDIA_ALLOWED_EXTS: &[&str] = &["mp4", "mov", "m4v", "wav", "mp3"];
+pub(crate) const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 fn normalize_and_validate_ext(ext: &str, allowed: &[&str]) -> Option<String> {
     let normalized = ext.trim().trim_start_matches('.').to_ascii_lowercase();
@@ -729,12 +977,40 @@ fn validate_document_payload(ext: &str, body: &[u8]) -> Result<(), ApiError> {
     }
 }
 
+fn validate_media_payload(ext: &str, body: &[u8]) -> Result<(), ApiError> {
+    let ok = match ext {
+        "mp4" | "mov" | "m4v" => body.len() >= 12 && &body[4 .. 8] == b"ftyp",
+        "wav" => body.len() >= 44 && body.starts_with(b"RIFF") && &body[8 .. 12] == b"WAVE",
+        // Header screening only; consumers must fully decode before processing.
+        "mp3" => {
+            (body.len() >= 10 && body.starts_with(b"ID3") && (2 ..= 4).contains(&body[3]))
+                || (body.len() >= 4
+                    && body[0] == 0xff
+                    && body[1] & 0xe0 == 0xe0
+                    && body[1] & 0x18 != 0x08
+                    && body[1] & 0x06 == 0x02
+                    && body[2] >> 4 != 0
+                    && body[2] >> 4 != 0x0f
+                    && body[2] & 0x0c != 0x0c)
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(error_code::INVALID_PARAMS.into()),
+        ))
+    }
+}
+
 fn sha256_hex(body: &[u8]) -> String {
     let digest = sha2::Sha256::digest(body);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn normalize_object_key(input: &str, private_bucket: &str) -> Option<String> {
+fn normalize_object_key(input: &str, s3: &S3Cfg, bucket: &StorageBucketCfg) -> Option<String> {
     let raw = input.trim();
     if raw.is_empty() {
         return None;
@@ -747,70 +1023,13 @@ fn normalize_object_key(input: &str, private_bucket: &str) -> Option<String> {
         raw.trim_start_matches('/').to_string()
     };
 
-    if let Some(stripped) = key.strip_prefix(&format!("{private_bucket}/")) {
+    if s3.addressing_style == S3AddressingStyle::Path
+        && let Some(stripped) = key.strip_prefix(&format!("{}/", bucket.bucket))
+    {
         key = stripped.to_string();
     }
 
     if key.is_empty() { None } else { Some(key) }
-}
-
-fn normalize_object_key_with_bucket<'a>(input: &str, s3: &'a S3Cfg) -> Option<(&'a str, String)> {
-    let raw = input.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    if s3.provider == S3Provider::CloudflareR2 {
-        if let Some(public_bucket_url) = normalized_public_bucket_url(s3) {
-            if let Some(path) = strip_url_base(raw, public_bucket_url) {
-                if !path.is_empty() {
-                    return Some((&s3.public_bucket, path));
-                }
-            }
-        }
-        if let Some(private_bucket_url) = normalized_private_bucket_url(s3) {
-            if let Some(path) = strip_url_base(raw, private_bucket_url) {
-                if !path.is_empty() {
-                    return Some((&s3.private_bucket, path));
-                }
-            }
-        }
-    }
-
-    let mut path = if let Some((_, after_scheme)) = raw.split_once("://") {
-        after_scheme
-            .split_once('/')
-            .map(|(_, p)| p)
-            .unwrap_or("")
-            .trim_start_matches('/')
-            .to_string()
-    } else {
-        raw.trim_start_matches('/').to_string()
-    };
-
-    if let Some(stripped) = path.strip_prefix(&format!("{}/", s3.private_bucket)) {
-        return Some((&s3.private_bucket, stripped.to_string()));
-    }
-    if let Some(stripped) = path.strip_prefix(&format!("{}/", s3.public_bucket)) {
-        return Some((&s3.public_bucket, stripped.to_string()));
-    }
-
-    if path.is_empty() {
-        return None;
-    }
-
-    if path.starts_with("avatars/") {
-        Some((&s3.public_bucket, path))
-    } else {
-        Some((&s3.private_bucket, std::mem::take(&mut path)))
-    }
-}
-
-fn strip_url_base(input: &str, base_url: &str) -> Option<String> {
-    let input = input.trim_end_matches('/');
-    let base_url = base_url.trim_end_matches('/');
-    let stripped = input.strip_prefix(base_url)?;
-    Some(stripped.trim_start_matches('/').to_string())
 }
 
 fn user_scope_key(user_id: &str, s3: &S3Cfg) -> String {
@@ -855,6 +1074,16 @@ fn content_type_for_document_ext(ext: &str) -> &'static str {
     }
 }
 
+fn content_type_for_media_ext(ext: &str) -> &'static str {
+    match ext {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,68 +1092,62 @@ mod tests {
         S3Cfg {
             provider,
             endpoint: "https://example-s3.local".to_string(),
+            addressing_style: S3AddressingStyle::Path,
             internal_endpoint: None,
-            public_bucket: "public-bucket".to_string(),
-            private_bucket: "private-bucket".to_string(),
+            buckets: vec![
+                StorageBucketCfg {
+                    id: AVATAR_BUCKET_ID.to_string(),
+                    bucket: "avatar-bucket".to_string(),
+                    read_policy: ReadPolicy::Public,
+                    key_prefix: "avatars".to_string(),
+                },
+                StorageBucketCfg {
+                    id: IMAGE_BUCKET_ID.to_string(),
+                    bucket: "image-bucket".to_string(),
+                    read_policy: ReadPolicy::Private,
+                    key_prefix: "users".to_string(),
+                },
+                StorageBucketCfg {
+                    id: DOCUMENT_BUCKET_ID.to_string(),
+                    bucket: "document-bucket".to_string(),
+                    read_policy: ReadPolicy::Private,
+                    key_prefix: "users".to_string(),
+                },
+                StorageBucketCfg {
+                    id: MEDIA_BUCKET_ID.to_string(),
+                    bucket: "media-bucket".to_string(),
+                    read_policy: ReadPolicy::Private,
+                    key_prefix: "users".to_string(),
+                },
+            ],
             region: Some("us-east-1".to_string()),
             access_key: "access".to_string(),
             secret_key: "secret".to_string(),
             user_key_salt: Some("salt".to_string()),
-            public_bucket_url: None,
-            private_bucket_url: None,
         }
     }
 
     #[test]
-    fn normalize_delete_key_preserves_s3_bucket_paths() {
+    fn normalize_key_removes_path_style_bucket_prefix() {
         let s3 = test_s3_cfg(S3Provider::S3);
-
-        let (bucket, key) = normalize_object_key_with_bucket(
-            "https://example-s3.local/public-bucket/avatars/u1",
+        let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
+        let key = normalize_object_key(
+            "https://example-s3.local/avatar-bucket/avatars/u1",
             &s3,
+            bucket,
         )
-        .expect("public key");
-
-        assert_eq!(bucket, "public-bucket");
+        .expect("avatar key");
         assert_eq!(key, "avatars/u1");
     }
 
     #[test]
-    fn normalize_delete_key_accepts_cloudflare_public_bucket_url() {
-        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
-        s3.public_bucket_url = Some("https://assets.example.com/".to_string());
-
-        let (bucket, key) =
-            normalize_object_key_with_bucket("https://assets.example.com/avatars/u1", &s3)
-                .expect("public key");
-
-        assert_eq!(bucket, "public-bucket");
-        assert_eq!(key, "avatars/u1");
-    }
-
-    #[test]
-    fn normalize_delete_key_accepts_cloudflare_private_bucket_url() {
-        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
-        s3.private_bucket_url = Some("https://vault.example.com/".to_string());
-
-        let (bucket, key) = normalize_object_key_with_bucket(
-            "https://vault.example.com/users/u1/images/file.png",
-            &s3,
-        )
-        .expect("private key");
-
-        assert_eq!(bucket, "private-bucket");
-        assert_eq!(key, "users/u1/images/file.png");
-    }
-
-    #[test]
-    fn cloudflare_upload_url_still_uses_s3_api_endpoint() {
-        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
-        s3.public_bucket_url = Some("https://assets.example.com".to_string());
+    fn bucket_config_owns_physical_bucket_selection() {
+        let s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
 
         assert_eq!(
-            s3_api_object_url(&s3.endpoint, &s3.public_bucket, "avatars/u1"),
-            "https://example-s3.local/public-bucket/avatars/u1"
+            s3_target(&s3, &s3.endpoint, &bucket.bucket, "avatars/u1").url,
+            "https://example-s3.local/avatar-bucket/avatars/u1"
         );
     }
 
@@ -936,12 +1159,12 @@ mod tests {
         assert_eq!(internal_s3_endpoint(&s3), "http://127.0.0.1:29999/");
         assert_eq!(s3_host(internal_s3_endpoint(&s3)), "127.0.0.1:29999");
         assert_eq!(
-            s3_api_object_url(internal_s3_endpoint(&s3), "private-bucket", "image.png"),
-            "http://127.0.0.1:29999/private-bucket/image.png"
+            s3_target(&s3, internal_s3_endpoint(&s3), "image-bucket", "image.png").url,
+            "http://127.0.0.1:29999/image-bucket/image.png"
         );
         assert_eq!(
-            s3_api_object_url(&s3.endpoint, "private-bucket", "image.png"),
-            "https://example-s3.local/private-bucket/image.png"
+            s3_target(&s3, &s3.endpoint, "image-bucket", "image.png").url,
+            "https://example-s3.local/image-bucket/image.png"
         );
     }
 
@@ -967,18 +1190,60 @@ mod tests {
     }
 
     #[test]
-    fn object_url_prefers_configured_bucket_urls() {
-        let mut s3 = test_s3_cfg(S3Provider::CloudflareR2);
-        s3.public_bucket_url = Some("https://assets.example.com/".to_string());
-        s3.private_bucket_url = Some("https://vault.example.com".to_string());
+    fn media_payload_validation_checks_iso_base_media_signature() {
+        assert!(validate_media_payload("mp4", b"\x00\x00\x00\x18ftypisomrest").is_ok());
+        assert!(validate_media_payload("mov", b"\x00\x00\x00\x14ftypqt  rest").is_ok());
+        assert!(validate_media_payload("mp4", b"not a video").is_err());
+    }
 
+    #[test]
+    fn media_audio_headers_and_mime_types() {
+        let mut wav = vec![0u8; 44];
+        wav[.. 4].copy_from_slice(b"RIFF");
+        wav[8 .. 12].copy_from_slice(b"WAVE");
+        assert!(validate_media_payload("wav", &wav).is_ok());
+        assert!(validate_media_payload("wav", b"RIFFshort").is_err());
+        assert!(validate_media_payload("mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00").is_ok());
+        assert!(validate_media_payload("mp3", &[0xff, 0xfb, 0x90, 0]).is_ok());
+        assert!(validate_media_payload("mp3", b"not audio").is_err());
+        assert_eq!(content_type_for_media_ext("wav"), "audio/wav");
+        assert_eq!(content_type_for_media_ext("mp3"), "audio/mpeg");
+    }
+
+    #[test]
+    fn ownership_uses_logical_bucket_category_and_prefix() {
+        let s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        let avatar = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
+        let image = storage_bucket(&s3, IMAGE_BUCKET_ID).unwrap();
         assert_eq!(
-            object_public_or_api_url(&s3, &s3.public_bucket, "avatars/u1"),
-            "https://assets.example.com/avatars/u1"
+            is_user_owned_key(AVATAR_BUCKET_ID, avatar, "u1", "avatars/u1"),
+            true
         );
         assert_eq!(
-            object_public_or_api_url(&s3, &s3.private_bucket, "users/u1/docs/a.pdf"),
-            "https://vault.example.com/users/u1/docs/a.pdf"
+            is_user_owned_key(IMAGE_BUCKET_ID, image, "u1", "users/u1/images/a.png"),
+            true
+        );
+    }
+
+    #[test]
+    fn legacy_key_without_bucket_id_resolves_its_logical_category() {
+        let s3 = test_s3_cfg(S3Provider::S3);
+
+        assert_eq!(
+            requested_bucket_id(&s3, None, "avatars/u1").unwrap(),
+            AVATAR_BUCKET_ID
+        );
+        assert_eq!(
+            requested_bucket_id(&s3, None, "users/u1/images/a.png").unwrap(),
+            IMAGE_BUCKET_ID
+        );
+        assert_eq!(
+            requested_bucket_id(&s3, Some(DOCUMENT_BUCKET_ID), "anything").unwrap(),
+            DOCUMENT_BUCKET_ID
+        );
+        assert_eq!(
+            requested_bucket_id(&s3, None, "users/u1/media/a.mp4").unwrap(),
+            MEDIA_BUCKET_ID
         );
     }
 }

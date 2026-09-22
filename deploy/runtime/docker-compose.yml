@@ -1,0 +1,13 @@
+name: file-service
+
+services:
+  file:
+    image: file-service:local
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${FILE_PORT:?FILE_PORT is required}:19878"
+    restart: unless-stopped

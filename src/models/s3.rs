@@ -2,11 +2,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct AccessSignQuery {
+    #[serde(default)]
+    pub bucket_id: Option<String>,
     pub key: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DeleteSignQuery {
+    #[serde(default)]
+    pub bucket_id: Option<String>,
     pub key: String,
 }
 
@@ -23,6 +27,7 @@ pub struct UploadExtQuery {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadSignResponse {
+    pub bucket_id: String,
     pub method: String,
     pub download_url: String,
     pub key: String,
@@ -30,6 +35,7 @@ pub struct DownloadSignResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadSignResponse {
+    pub bucket_id: String,
     pub method: String,
     pub upload_url: String,
     pub key: String,
@@ -39,6 +45,7 @@ pub struct UploadSignResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerUploadResponse {
+    pub bucket_id: String,
     pub key: String,
     pub url: String,
     pub sha256: String,
@@ -48,6 +55,7 @@ pub struct ServerUploadResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteSignResponse {
+    pub bucket_id: String,
     pub method: String,
     pub delete_url: String,
     pub key: String,

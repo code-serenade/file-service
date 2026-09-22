@@ -3,6 +3,7 @@ port = 29002
 
 [jwt_verify]
 url = "http://10.100.11.246:29001/internal/jwt_verify_config"
+avatar_provider_url = "http://10.100.11.246:29001/internal/avatar_provider"
 header = "x-internal-token"
 token = "dev-internal-token-change-me"
 
@@ -14,17 +15,42 @@ provider = "s3"
 endpoint = "http://127.0.0.1:9000"
 # Optional. File-service uses this for its own HEAD/PUT requests; clients still receive `endpoint`.
 internal_endpoint = "http://127.0.0.1:9000"
-public_bucket = "test-public-bucket"
-private_bucket = "test-private-bucket"
 region = "us-east-1"
 access_key = "ROOTNAME"
 secret_key = "CHANGEME123"
 
+[[s3.buckets]]
+id = "avatar"
+bucket = "test-avatars"
+read_policy = "private"
+key_prefix = "avatars"
+
+[[s3.buckets]]
+id = "image"
+bucket = "test-images"
+read_policy = "private"
+key_prefix = "users"
+
+[[s3.buckets]]
+id = "document"
+bucket = "test-documents"
+read_policy = "private"
+key_prefix = "users"
+
+[[s3.buckets]]
+id = "media"
+bucket = "test-media"
+read_policy = "private"
+key_prefix = "users"
+
 [r2]
 provider = "cloudflare_r2"
 endpoint = "https://<account_id>.r2.cloudflarestorage.com"
-public_bucket = "app-public"
-private_bucket = "app-private"
 access_key = "<r2-access-key-id>"
 secret_key = "<r2-secret-access-key>"
-public_bucket_url = "https://assets.example.com"
+
+[[r2.buckets]]
+id = "avatar"
+bucket = "app-avatars"
+read_policy = "private"
+key_prefix = "avatars"

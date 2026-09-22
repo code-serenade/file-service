@@ -1,6 +1,10 @@
 /target
 /logs
 /tmp
+/dist
+/deploy/artifacts
+/deploy/runtime/*.local.env
+/deploy/upload.local.env
 
 #MacOS
 **/.DS_Store
