@@ -232,7 +232,7 @@ pub async fn put_upload_media(
 }
 
 pub async fn access_sign(
-    Extension(auth_user): Extension<AuthUser>,
+    auth_user: Option<Extension<AuthUser>>,
     Extension(s3): Extension<Arc<S3Cfg>>,
     Query(query): Query<AccessSignQuery>,
 ) -> ResponseResult<DownloadSignResponse> {
@@ -243,12 +243,7 @@ pub async fn access_sign(
         Json(error_code::INVALID_PARAMS.into()),
     ))?;
 
-    let user_scope = user_scope_key(&auth_user.user_id, &s3);
-    if !is_user_owned_key(&bucket_id, bucket, &user_scope, &normalized_key) {
-        return Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into())));
-    }
-
-    let response = if bucket.read_policy == ReadPolicy::Public {
+    let response = if bucket.read_policy() == ReadPolicy::Public {
         DownloadSignResponse {
             bucket_id: bucket_id.clone(),
             method: "GET".to_string(),
@@ -263,6 +258,14 @@ pub async fn access_sign(
             key: normalized_key,
         }
     } else {
+        let auth_user = auth_user.ok_or((
+            StatusCode::UNAUTHORIZED,
+            Json(error_code::UNAUTHORIZED.into()),
+        ))?;
+        let user_scope = user_scope_key(&auth_user.0.user_id, &s3);
+        if !is_user_owned_key(&bucket_id, bucket, &user_scope, &normalized_key) {
+            return Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into())));
+        }
         sign_access_request(&s3, bucket, &bucket_id, &normalized_key)
     };
 
@@ -1133,7 +1136,7 @@ mod tests {
                 StorageBucketCfg {
                     id: AVATAR_BUCKET_ID.to_string(),
                     bucket: "avatar-bucket".to_string(),
-                    read_policy: ReadPolicy::Public,
+                    read_policy: Some(ReadPolicy::Public),
                     key_prefix: "avatars".to_string(),
                     provider: None,
                     endpoint: None,
@@ -1146,7 +1149,7 @@ mod tests {
                 StorageBucketCfg {
                     id: IMAGE_BUCKET_ID.to_string(),
                     bucket: "image-bucket".to_string(),
-                    read_policy: ReadPolicy::Private,
+                    read_policy: Some(ReadPolicy::Private),
                     key_prefix: "users".to_string(),
                     provider: None,
                     endpoint: None,
@@ -1159,7 +1162,7 @@ mod tests {
                 StorageBucketCfg {
                     id: DOCUMENT_BUCKET_ID.to_string(),
                     bucket: "document-bucket".to_string(),
-                    read_policy: ReadPolicy::Private,
+                    read_policy: Some(ReadPolicy::Private),
                     key_prefix: "users".to_string(),
                     provider: None,
                     endpoint: None,
@@ -1172,7 +1175,7 @@ mod tests {
                 StorageBucketCfg {
                     id: MEDIA_BUCKET_ID.to_string(),
                     bucket: "media-bucket".to_string(),
-                    read_policy: ReadPolicy::Private,
+                    read_policy: Some(ReadPolicy::Private),
                     key_prefix: "users".to_string(),
                     provider: None,
                     endpoint: None,

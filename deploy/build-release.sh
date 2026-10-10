@@ -47,7 +47,7 @@ echo "==> Building file-service for linux/amd64 without network access"
 docker run --rm --pull=never --platform "$PLATFORM" --network none \
   -e CARGO_HOME=/cargo-home \
   -v "$PROJECT_DIR:/workspace" \
-  -v "$registry_dir:/cargo-home/registry:ro" \
+  -v "$registry_dir:/cargo-home/registry" \
   -w /workspace \
   "$BUILDER_IMAGE" \
   cargo build --offline --locked --release

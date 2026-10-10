@@ -21,7 +21,7 @@ region = "us-east-1"
 [[s3.buckets]]
 id = "avatar"
 bucket = "test-avatars"
-read_policy = "private"
+read_policy = "public"
 key_prefix = "avatars"
 
 [[s3.buckets]]

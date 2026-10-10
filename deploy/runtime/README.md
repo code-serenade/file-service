@@ -30,7 +30,7 @@ vi deploy.env
 - `AUTH_INTERNAL_TOKEN`：必须与 auth 包的 `INTERNAL_AUTH_TOKEN` 完全一致。
 - `S3_BUCKET_IDS`：逗号分隔的逻辑存储类别列表，必须包含 `avatar,image,document,media`。
 - `S3_BUCKET_<ID>`：该类别对应的真实 bucket 名称。
-- `S3_BUCKET_<ID>_READ_POLICY`：读取策略，取值为 `public` 或 `private`。
+- `S3_BUCKET_<ID>_READ_POLICY`：读取策略，取值为 `public` 或 `private`；省略时 avatar 默认为 `public`，其他资源默认为 `private`。
 - `S3_BUCKET_<ID>_KEY_PREFIX`：该类别的对象 key 前缀。
 - `S3_PROVIDER`、`S3_ENDPOINT`、`S3_INTERNAL_ENDPOINT`、`S3_ADDRESSING_STYLE`、`S3_REGION`：所有 bucket 共用的默认连接配置。
 - `S3_BUCKET_<ID>_PROVIDER`、`_ENDPOINT`、`_INTERNAL_ENDPOINT`、`_ADDRESSING_STYLE`、`_REGION`：仅在某个资源使用不同连接配置时填写，用于覆盖全局默认值。provider 可填 `aws`、`tencent_cos`、`minio`、`rustfs`、`cloudflare_r2` 等标识；COS 等需要虚拟主机寻址的服务使用 `virtual_host`。
@@ -39,13 +39,15 @@ vi deploy.env
 
 所有资源共用一套 S3 服务时，只填写全局连接配置即可。个别资源需要不同服务或区域时，再填写对应的 `S3_BUCKET_<ID>_*` 覆盖项。设置全局 `S3_ACCESS_KEY`、`S3_SECRET_KEY` 时，所有 bucket 共用它们；两项都留空时，则必须为每个 bucket 设置独立的凭据。
 
-客户端只会得到逻辑 `bucket_id`，不会提交或选择真实 bucket。所有写入、覆盖、删除
-仍由 file-service 使用 JWT 与对象归属进行校验；`READ_POLICY` 只影响读取。`USER_KEY_SALT`
+客户端只会得到逻辑 `bucket_id`，不会提交或选择真实 bucket。`public` 类别的
+`/file/sign/access` 可匿名调用；`private` 类别要求有效 JWT，并根据 JWT 中的用户 ID
+校验 object-key 归属。所有上传、覆盖、删除始终要求 JWT 并校验对象归属。`USER_KEY_SALT`
 在打包时随机生成，用于为每个用户生成稳定的对象 key。不要在已投入使用后修改它。
 
 默认部署配置中的 avatar、image、document、media 都使用 `private` 读取策略。将某个类别的
-`S3_BUCKET_<ID>_READ_POLICY` 改为 `public` 仅表示对象存储可匿名读取；不会放开上传、
-覆盖、删除或 bucket 列举。
+`S3_BUCKET_<ID>_READ_POLICY` 改为 `public` 后，file-service 的访问签名接口允许匿名请求并
+返回直链。对象存储 bucket 也必须配置为公共读，否则直链仍无法读取。该设置不会放开
+上传、覆盖、删除或 bucket 列举。
 
 每次修改配置后运行：
 

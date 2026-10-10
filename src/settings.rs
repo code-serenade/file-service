@@ -81,7 +81,7 @@ pub struct StorageBucketCfg {
     /// Provider bucket/container name.
     pub bucket: String,
     #[serde(default)]
-    pub read_policy: ReadPolicy,
+    pub read_policy: Option<ReadPolicy>,
     #[serde(default)]
     pub key_prefix: String,
     /// Per-resource settings. Credentials are overridden by config/keys.toml
@@ -123,6 +123,14 @@ pub enum ReadPolicy {
 }
 
 impl StorageBucketCfg {
+    pub fn read_policy(&self) -> ReadPolicy {
+        self.read_policy.unwrap_or(if self.id == "avatar" {
+            ReadPolicy::Public
+        } else {
+            ReadPolicy::Private
+        })
+    }
+
     pub fn provider<'a>(&'a self, defaults: &'a S3Cfg) -> &'a str {
         self.provider.as_deref().unwrap_or(&defaults.provider)
     }
