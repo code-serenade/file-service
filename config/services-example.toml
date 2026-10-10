@@ -3,7 +3,6 @@ port = 29002
 
 [jwt_verify]
 url = "http://10.100.11.246:29001/internal/jwt_verify_config"
-avatar_provider_url = "http://10.100.11.246:29001/internal/avatar_provider"
 header = "x-internal-token"
 token = "dev-internal-token-change-me"
 
@@ -11,13 +10,13 @@ token = "dev-internal-token-change-me"
 user_key_salt = "please-change-to-random-long-string"
 
 [s3]
+# Shared connection settings apply to all buckets unless a bucket overrides them.
 provider = "s3"
+addressing_style = "path"
 endpoint = "http://127.0.0.1:9000"
-# Optional. File-service uses this for its own HEAD/PUT requests; clients still receive `endpoint`.
 internal_endpoint = "http://127.0.0.1:9000"
 region = "us-east-1"
-access_key = "ROOTNAME"
-secret_key = "CHANGEME123"
+# Copy config/keys-example.toml to config/keys.toml for shared credentials.
 
 [[s3.buckets]]
 id = "avatar"
@@ -42,15 +41,3 @@ id = "media"
 bucket = "test-media"
 read_policy = "private"
 key_prefix = "users"
-
-[r2]
-provider = "cloudflare_r2"
-endpoint = "https://<account_id>.r2.cloudflarestorage.com"
-access_key = "<r2-access-key-id>"
-secret_key = "<r2-secret-access-key>"
-
-[[r2.buckets]]
-id = "avatar"
-bucket = "app-avatars"
-read_policy = "private"
-key_prefix = "avatars"

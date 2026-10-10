@@ -10,6 +10,10 @@ BUNDLE_NAME="file-service-linux-x86_64-docker"
 BUNDLE_DIR="$OUTPUT_ROOT/$BUNDLE_NAME"
 ARCHIVE_PATH="$OUTPUT_ROOT/$BUNDLE_NAME.tar.gz"
 IMAGE_TAR="file-service-images.tar"
+DEPLOY_ENV="$SCRIPT_DIR/runtime/deploy.local.env"
+if [ ! -f "$DEPLOY_ENV" ]; then
+  DEPLOY_ENV="$SCRIPT_DIR/runtime/deploy.env"
+fi
 
 random_hex() {
   od -An -N 32 -tx1 /dev/urandom | tr -d ' \n'
@@ -34,7 +38,7 @@ mkdir -p "$BUNDLE_DIR"
 echo "==> Saving Docker image"
 docker save --platform linux/amd64 "$IMAGE" -o "$BUNDLE_DIR/$IMAGE_TAR"
 
-cp "$SCRIPT_DIR/runtime/deploy.env" "$BUNDLE_DIR/deploy.env"
+cp "$DEPLOY_ENV" "$BUNDLE_DIR/deploy.env"
 cp "$SCRIPT_DIR/runtime/docker-compose.yml" "$BUNDLE_DIR/docker-compose.yml"
 cp "$SCRIPT_DIR/runtime/install.sh" "$BUNDLE_DIR/install.sh"
 cp "$SCRIPT_DIR/runtime/stop.sh" "$BUNDLE_DIR/stop.sh"

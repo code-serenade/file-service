@@ -27,22 +27,23 @@ vi deploy.env
 实施人员只修改 `deploy.env`。其中以下配置必须按实际环境填写：
 
 - `AUTH_JWT_VERIFY_URL`：auth 的 `/internal/jwt_verify_config` 地址；默认指向同机 `39999` 端口。
-- `AUTH_AVATAR_PROVIDER_URL`：auth 的 `/internal/avatar_provider` 地址；file-service 会在启动后注册头像公开 URL，并持续重试。
 - `AUTH_INTERNAL_TOKEN`：必须与 auth 包的 `INTERNAL_AUTH_TOKEN` 完全一致。
-- `S3_ENDPOINT`：浏览器访问和预签名 URL 使用的对象存储地址。
-- `S3_INTERNAL_ENDPOINT`：file 服务自身执行 HEAD/PUT 使用的地址；可与 `S3_ENDPOINT` 相同。
-- `S3_ADDRESSING_STYLE`：默认 `path`。腾讯 COS 使用 `virtual_host`，并将 endpoint 配置为区域地址。
-- `S3_ACCESS_KEY`、`S3_SECRET_KEY`：对象存储访问凭据。
 - `S3_BUCKET_IDS`：逗号分隔的逻辑存储类别列表，必须包含 `avatar,image,document,media`。
 - `S3_BUCKET_<ID>`：该类别对应的真实 bucket 名称。
 - `S3_BUCKET_<ID>_READ_POLICY`：读取策略，取值为 `public` 或 `private`。
 - `S3_BUCKET_<ID>_KEY_PREFIX`：该类别的对象 key 前缀。
+- `S3_PROVIDER`、`S3_ENDPOINT`、`S3_INTERNAL_ENDPOINT`、`S3_ADDRESSING_STYLE`、`S3_REGION`：所有 bucket 共用的默认连接配置。
+- `S3_BUCKET_<ID>_PROVIDER`、`_ENDPOINT`、`_INTERNAL_ENDPOINT`、`_ADDRESSING_STYLE`、`_REGION`：仅在某个资源使用不同连接配置时填写，用于覆盖全局默认值。provider 可填 `aws`、`tencent_cos`、`minio`、`rustfs`、`cloudflare_r2` 等标识；COS 等需要虚拟主机寻址的服务使用 `virtual_host`。
+- `S3_BUCKET_<ID>_ACCESS_KEY`、`_SECRET_KEY`：共享密钥文件不存在时，每个 bucket 必须分别设置这两个值。
+- `S3_ACCESS_KEY`、`S3_SECRET_KEY`：同时设置时，安装器生成 `config/keys.toml` 并让所有 bucket 使用这组凭据。
+
+所有资源共用一套 S3 服务时，只填写全局连接配置即可。个别资源需要不同服务或区域时，再填写对应的 `S3_BUCKET_<ID>_*` 覆盖项。设置全局 `S3_ACCESS_KEY`、`S3_SECRET_KEY` 时，所有 bucket 共用它们；两项都留空时，则必须为每个 bucket 设置独立的凭据。
 
 客户端只会得到逻辑 `bucket_id`，不会提交或选择真实 bucket。所有写入、覆盖、删除
 仍由 file-service 使用 JWT 与对象归属进行校验；`READ_POLICY` 只影响读取。`USER_KEY_SALT`
 在打包时随机生成，用于为每个用户生成稳定的对象 key。不要在已投入使用后修改它。
 
-默认部署配置中的 avatar、image、document 都使用 `private` 读取策略。将某个类别的
+默认部署配置中的 avatar、image、document、media 都使用 `private` 读取策略。将某个类别的
 `S3_BUCKET_<ID>_READ_POLICY` 改为 `public` 仅表示对象存储可匿名读取；不会放开上传、
 覆盖、删除或 bucket 列举。
 

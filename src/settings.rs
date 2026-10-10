@@ -1,5 +1,6 @@
+use std::path::Path;
+
 use serde::Deserialize;
-use serde_json::json;
 use toolcraft_config::load_settings;
 use toolcraft_jwt::{VerifyJwt, VerifyJwtCfg};
 use toolcraft_request::{HeaderMap, Request};
@@ -13,8 +14,6 @@ pub struct Settings {
     #[serde(default)]
     pub storage: StorageCfg,
     pub s3: S3Cfg,
-    #[serde(default)]
-    pub r2: Option<S3Cfg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,8 +26,6 @@ pub struct JwtVerifyRemoteCfg {
     pub url: String,
     pub header: String,
     pub token: String,
-    #[serde(default)]
-    pub avatar_provider_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -52,11 +49,17 @@ struct JwtVerifyConfigData {
 }
 
 #[derive(Debug, Deserialize)]
+struct S3KeysCfg {
+    access_key: String,
+    secret_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct S3Cfg {
-    #[serde(default)]
-    pub provider: S3Provider,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     /// Browser-facing endpoint used when returning signed URLs to clients.
-    pub endpoint: String,
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub addressing_style: S3AddressingStyle,
     /// Optional endpoint for file-service's own S3 API requests.
@@ -67,8 +70,6 @@ pub struct S3Cfg {
     pub buckets: Vec<StorageBucketCfg>,
     #[serde(default)]
     pub region: Option<String>,
-    pub access_key: String,
-    pub secret_key: String,
     #[serde(default)]
     pub user_key_salt: Option<String>,
 }
@@ -83,17 +84,29 @@ pub struct StorageBucketCfg {
     pub read_policy: ReadPolicy,
     #[serde(default)]
     pub key_prefix: String,
+    /// Per-resource settings. Credentials are overridden by config/keys.toml
+    /// when that shared key file exists.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub addressing_style: Option<S3AddressingStyle>,
+    #[serde(default)]
+    pub internal_endpoint: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum S3Provider {
-    #[default]
-    S3,
-    CloudflareR2,
+fn default_provider() -> String {
+    "s3".to_string()
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum S3AddressingStyle {
     #[default]
@@ -101,7 +114,7 @@ pub enum S3AddressingStyle {
     VirtualHost,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadPolicy {
     Public,
@@ -109,17 +122,58 @@ pub enum ReadPolicy {
     Private,
 }
 
+impl StorageBucketCfg {
+    pub fn provider<'a>(&'a self, defaults: &'a S3Cfg) -> &'a str {
+        self.provider.as_deref().unwrap_or(&defaults.provider)
+    }
+
+    pub fn endpoint<'a>(&'a self, defaults: &'a S3Cfg) -> &'a str {
+        self.endpoint
+            .as_deref()
+            .or(defaults.endpoint.as_deref())
+            .unwrap_or("")
+    }
+
+    pub fn addressing_style(&self, defaults: &S3Cfg) -> S3AddressingStyle {
+        self.addressing_style.unwrap_or(defaults.addressing_style)
+    }
+
+    pub fn access_key(&self) -> &str {
+        self.access_key.as_deref().unwrap_or("")
+    }
+
+    pub fn secret_key(&self) -> &str {
+        self.secret_key.as_deref().unwrap_or("")
+    }
+}
+
 impl Settings {
     pub fn load(config_path: &str) -> Result<Self> {
-        let r = load_settings(config_path)?;
-        Ok(r)
+        let mut settings: Self = load_settings(config_path)?;
+        let config_dir = Path::new(config_path)
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let keys_path = config_dir.join("keys.toml");
+        if keys_path.exists() {
+            let keys_path_str = keys_path.to_string_lossy();
+            let keys: S3KeysCfg = load_settings(&keys_path_str)?;
+            if keys.access_key.trim().is_empty() || keys.secret_key.trim().is_empty() {
+                return Err(Error::Message(format!(
+                    "{} requires non-empty access_key and secret_key",
+                    keys_path.display()
+                )));
+            }
+            for bucket in &mut settings.s3.buckets {
+                bucket.access_key = Some(keys.access_key.clone());
+                bucket.secret_key = Some(keys.secret_key.clone());
+            }
+        }
+        Ok(settings)
     }
 
     pub fn validate_storage_buckets(&self) -> Result<()> {
         self.s3.validate_buckets("s3")?;
-        if let Some(r2) = &self.r2 {
-            r2.validate_buckets("r2")?;
-        }
         Ok(())
     }
 }
@@ -132,6 +186,19 @@ impl S3Cfg {
             if bucket.id.trim().is_empty() || bucket.bucket.trim().is_empty() {
                 return Err(Error::Message(format!(
                     "[{provider_name}.buckets] requires non-empty id and bucket"
+                )));
+            }
+            if bucket.endpoint(self).trim().is_empty() {
+                return Err(Error::Message(format!(
+                    "[{provider_name}.buckets] '{}' has an empty endpoint",
+                    bucket.id
+                )));
+            }
+            if bucket.access_key().trim().is_empty() || bucket.secret_key().trim().is_empty() {
+                return Err(Error::Message(format!(
+                    "[{provider_name}.buckets] '{}' requires access_key and secret_key, or \
+                     config/keys.toml",
+                    bucket.id
                 )));
             }
             if self
@@ -191,54 +258,5 @@ impl JwtVerifyRemoteCfg {
         })?;
 
         Ok(verifier)
-    }
-
-    pub async fn register_avatar_provider(&self, public_base_url: &str) -> Result<()> {
-        let url = self
-            .avatar_provider_url
-            .as_deref()
-            .ok_or_else(|| Error::Message("missing jwt_verify.avatar_provider_url".to_string()))?;
-        let client = Request::new()?;
-        let mut headers = HeaderMap::new();
-        headers.insert(self.header.clone(), self.token.clone())?;
-        let response = client
-            .post(
-                url,
-                &json!({ "public_base_url": public_base_url }),
-                Some(headers),
-            )
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(Error::Message(format!(
-                "register avatar provider failed: status={}",
-                response.status()
-            )));
-        }
-        Ok(())
-    }
-}
-
-impl S3Cfg {
-    pub fn avatar_public_base_url(&self) -> Result<String> {
-        let bucket = self
-            .buckets
-            .iter()
-            .find(|bucket| bucket.id == "avatar")
-            .ok_or_else(|| Error::Message("missing avatar storage bucket".to_string()))?;
-
-        if bucket.read_policy != ReadPolicy::Public {
-            return Err(Error::Message(
-                "avatar storage bucket must use public read_policy".to_string(),
-            ));
-        }
-
-        let endpoint = self.endpoint.trim_end_matches('/');
-        if self.addressing_style == S3AddressingStyle::VirtualHost {
-            let (scheme, host) = endpoint.split_once("://").unwrap_or(("https", endpoint));
-            Ok(format!("{scheme}://{}.{}", bucket.bucket, host))
-        } else {
-            Ok(format!("{endpoint}/{}", bucket.bucket))
-        }
     }
 }

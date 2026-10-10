@@ -23,7 +23,7 @@ use crate::{
         AccessSignQuery, DeleteSignQuery, DeleteSignResponse, DownloadSignResponse,
         ServerUploadResponse, UploadAvatarQuery, UploadExtQuery, UploadHeaders, UploadSignResponse,
     },
-    settings::{ReadPolicy, S3AddressingStyle, S3Cfg, S3Provider, StorageBucketCfg},
+    settings::{ReadPolicy, S3AddressingStyle, S3Cfg, StorageBucketCfg},
     utils::base62::encode_u128,
 };
 
@@ -63,7 +63,7 @@ pub async fn upload_image(
     let content_type = content_type_for_image_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
     let key = image_key(bucket, &user_scope, &filename, &ext);
-    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
+    let already_uploaded = object_exists(&s3, bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
         bucket,
@@ -93,7 +93,7 @@ pub async fn upload_document(
     let content_type = content_type_for_document_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
     let key = document_key(bucket, &user_scope, &filename, &ext);
-    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
+    let already_uploaded = object_exists(&s3, bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
         bucket,
@@ -123,7 +123,7 @@ pub async fn upload_media(
     let content_type = content_type_for_media_ext(&ext);
     let user_scope = user_scope_key(&auth_user.user_id, &s3);
     let key = media_key(bucket, &user_scope, &filename, &ext);
-    let already_uploaded = object_exists(&s3, &bucket.bucket, &key).await?;
+    let already_uploaded = object_exists(&s3, bucket, &key).await?;
     Ok(sign_upload_request(
         &s3,
         bucket,
@@ -252,11 +252,18 @@ pub async fn access_sign(
         DownloadSignResponse {
             bucket_id: bucket_id.clone(),
             method: "GET".to_string(),
-            download_url: s3_target(&s3, &s3.endpoint, &bucket.bucket, &normalized_key).url,
+            download_url: s3_target(
+                &s3,
+                bucket,
+                bucket.endpoint(&s3),
+                &bucket.bucket,
+                &normalized_key,
+            )
+            .url,
             key: normalized_key,
         }
     } else {
-        sign_access_request(&s3, &bucket_id, &bucket.bucket, &normalized_key)
+        sign_access_request(&s3, bucket, &bucket_id, &normalized_key)
     };
 
     Ok(response.into_common_response().to_json())
@@ -280,7 +287,7 @@ pub async fn delete_sign(
     }
 
     Ok(
-        sign_delete_request(&s3, &bucket_id, &bucket.bucket, &normalized_key)
+        sign_delete_request(&s3, bucket, &bucket_id, &normalized_key)
             .into_common_response()
             .to_json(),
     )
@@ -295,19 +302,19 @@ async fn server_upload_object(
     check_existing: bool,
 ) -> ResponseResult<ServerUploadResponse> {
     let already_uploaded = if check_existing {
-        object_exists(s3, &bucket.bucket, key).await?
+        object_exists(s3, bucket, key).await?
     } else {
         false
     };
 
     if !already_uploaded {
-        put_object_to_s3(s3, &bucket.bucket, key, content_type, body.clone()).await?;
+        put_object_to_s3(s3, bucket, key, content_type, body.clone()).await?;
     }
 
     Ok(ServerUploadResponse {
         bucket_id: bucket.id.clone(),
         key: key.to_string(),
-        url: s3_target(s3, &s3.endpoint, &bucket.bucket, key).url,
+        url: s3_target(s3, bucket, bucket.endpoint(s3), &bucket.bucket, key).url,
         sha256: sha256_hex(body),
         size: body.len(),
         already_uploaded,
@@ -318,18 +325,18 @@ async fn server_upload_object(
 
 async fn put_object_to_s3(
     s3: &S3Cfg,
-    bucket: &str,
+    bucket: &StorageBucketCfg,
     key: &str,
     content_type: &str,
     body: Bytes,
 ) -> Result<(), ApiError> {
-    let endpoint = internal_s3_endpoint(s3);
-    let target = s3_target(s3, endpoint, bucket, key);
-    let region = signing_region(s3);
+    let endpoint = internal_s3_endpoint(s3, bucket);
+    let target = s3_target(s3, bucket, endpoint, &bucket.bucket, key);
+    let region = signing_region(s3, bucket);
     let signed = sign_request(
         "PUT",
-        &s3.access_key,
-        &s3.secret_key,
+        bucket.access_key(),
+        bucket.secret_key(),
         &target.host,
         &target.path,
         "",
@@ -391,7 +398,7 @@ async fn put_object_to_s3(
         .map_err(|err| {
             warn!(
                 error = %err,
-                bucket = %bucket,
+                bucket = %bucket.bucket,
                 key = %key,
                 object_url = %object_url,
                 "s3 object PUT request failed before response"
@@ -408,7 +415,7 @@ async fn put_object_to_s3(
 
     warn!(
         status = response.status().as_u16(),
-        bucket = %bucket,
+        bucket = %bucket.bucket,
         key = %key,
         object_url = %object_url,
         "s3 object PUT returned non-success status"
@@ -427,14 +434,14 @@ fn sign_upload_request(
     content_disposition: Option<&str>,
     already_uploaded: bool,
 ) -> UploadSignResponse {
-    let target = s3_target(s3, &s3.endpoint, &bucket.bucket, key);
+    let target = s3_target(s3, bucket, bucket.endpoint(s3), &bucket.bucket, key);
 
-    let region = signing_region(s3);
+    let region = signing_region(s3, bucket);
 
     let signed = sign_request(
         "PUT",
-        &s3.access_key,
-        &s3.secret_key,
+        bucket.access_key(),
+        bucket.secret_key(),
         &target.host,
         &target.path,
         "",
@@ -457,12 +464,14 @@ fn sign_upload_request(
     }
 }
 
-fn internal_s3_endpoint(s3: &S3Cfg) -> &str {
-    s3.internal_endpoint
+fn internal_s3_endpoint<'a>(s3: &'a S3Cfg, bucket: &'a StorageBucketCfg) -> &'a str {
+    bucket
+        .internal_endpoint
         .as_deref()
+        .or(s3.internal_endpoint.as_deref())
         .map(str::trim)
         .filter(|endpoint| !endpoint.is_empty())
-        .unwrap_or(&s3.endpoint)
+        .unwrap_or_else(|| bucket.endpoint(s3))
 }
 
 fn s3_host(endpoint: &str) -> String {
@@ -479,10 +488,16 @@ struct S3Target {
     path: String,
 }
 
-fn s3_target(s3: &S3Cfg, endpoint: &str, bucket: &str, key: &str) -> S3Target {
+fn s3_target(
+    s3: &S3Cfg,
+    config: &StorageBucketCfg,
+    endpoint: &str,
+    bucket: &str,
+    key: &str,
+) -> S3Target {
     let endpoint = endpoint.trim_end_matches('/');
     let key = key.trim_start_matches('/');
-    if s3.addressing_style == S3AddressingStyle::VirtualHost {
+    if config.addressing_style(s3) == S3AddressingStyle::VirtualHost {
         let (scheme, host) = endpoint.split_once("://").unwrap_or(("https", endpoint));
         let host = format!("{bucket}.{host}");
         return S3Target {
@@ -592,23 +607,25 @@ fn key_matches_bucket_id(bucket_id: &str, bucket: &StorageBucketCfg, key: &str) 
     }
 }
 
-fn signing_region(s3: &S3Cfg) -> Option<&str> {
-    s3.region
+fn signing_region<'a>(s3: &'a S3Cfg, bucket: &'a StorageBucketCfg) -> Option<&'a str> {
+    bucket
+        .region
         .as_deref()
+        .or(s3.region.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| (s3.provider == S3Provider::CloudflareR2).then_some("auto"))
+        .or_else(|| (bucket.provider(s3) == "cloudflare_r2").then_some("auto"))
 }
 
-async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiError> {
-    let endpoint = internal_s3_endpoint(s3);
-    let target = s3_target(s3, endpoint, bucket, key);
-    let region = signing_region(s3);
+async fn object_exists(s3: &S3Cfg, bucket: &StorageBucketCfg, key: &str) -> Result<bool, ApiError> {
+    let endpoint = internal_s3_endpoint(s3, bucket);
+    let target = s3_target(s3, bucket, endpoint, &bucket.bucket, key);
+    let region = signing_region(s3, bucket);
 
     let signed = sign_request(
         "HEAD",
-        &s3.access_key,
-        &s3.secret_key,
+        bucket.access_key(),
+        bucket.secret_key(),
         &target.host,
         &target.path,
         "",
@@ -645,7 +662,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         endpoint = %endpoint,
         host = %target.host,
         region = ?region,
-        bucket = %bucket,
+        bucket = %bucket.bucket,
         key = %key,
         object_url = %object_url,
         "checking s3 object existence"
@@ -664,7 +681,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
             warn!(
                 error = %err,
                 error_debug = ?err,
-                bucket = %bucket,
+                bucket = %bucket.bucket,
                 key = %key,
                 object_url = %object_url,
                 "s3 object HEAD request failed before response"
@@ -677,7 +694,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
 
     debug!(
         status = response.status().as_u16(),
-        bucket = %bucket,
+        bucket = %bucket.bucket,
         key = %key,
         object_url = %object_url,
         "s3 object HEAD response received"
@@ -688,7 +705,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         StatusCode::NOT_FOUND => Ok(false),
         StatusCode::FORBIDDEN => {
             debug!(
-                bucket = %bucket,
+                bucket = %bucket.bucket,
                 key = %key,
                 object_url = %object_url,
                 "s3 object HEAD returned forbidden; continue upload signing as not uploaded"
@@ -698,7 +715,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         status if status.is_server_error() => {
             warn!(
                 status = status.as_u16(),
-                bucket = %bucket,
+                bucket = %bucket.bucket,
                 key = %key,
                 object_url = %object_url,
                 "s3 object HEAD returned server error"
@@ -711,7 +728,7 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
         status => {
             warn!(
                 status = status.as_u16(),
-                bucket = %bucket,
+                bucket = %bucket.bucket,
                 key = %key,
                 object_url = %object_url,
                 "s3 object HEAD returned unexpected status"
@@ -726,22 +743,29 @@ async fn object_exists(s3: &S3Cfg, bucket: &str, key: &str) -> Result<bool, ApiE
 
 fn sign_access_request(
     s3: &S3Cfg,
+    config: &StorageBucketCfg,
     bucket_id: &str,
-    bucket: &str,
     key: &str,
 ) -> DownloadSignResponse {
-    let region = signing_region(s3);
+    let region = signing_region(s3, config);
 
-    let download_url = if s3.addressing_style == S3AddressingStyle::VirtualHost {
-        presign_virtual_get(s3, bucket, key, region.unwrap_or("us-east-1"), 600)
+    let download_url = if config.addressing_style(s3) == S3AddressingStyle::VirtualHost {
+        presign_virtual_get(
+            s3,
+            config,
+            &config.bucket,
+            key,
+            region.unwrap_or("us-east-1"),
+            600,
+        )
     } else {
         presign_get_object(
-            &s3.access_key,
-            &s3.secret_key,
-            bucket,
+            config.access_key(),
+            config.secret_key(),
+            &config.bucket,
             key,
             region,
-            &s3.endpoint,
+            config.endpoint(s3),
             Some(600),
         )
     };
@@ -756,18 +780,21 @@ fn sign_access_request(
 
 fn presign_virtual_get(
     s3: &S3Cfg,
+    config: &StorageBucketCfg,
     bucket: &str,
     key: &str,
     region: &str,
     expires_secs: u64,
 ) -> String {
-    let target = s3_target(s3, &s3.endpoint, bucket, key);
+    let target = s3_target(s3, config, config.endpoint(s3), bucket, key);
     let now = Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let credential = format!(
         "{}/{}/{}/s3/aws4_request",
-        s3.access_key, date_stamp, region
+        config.access_key(),
+        date_stamp,
+        region
     );
     let query = format!(
         "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={}&X-Amz-Expires={}&\
@@ -785,7 +812,10 @@ fn presign_virtual_get(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
         sha256_hex_10(canonical_request.as_bytes())
     );
-    let date_key = hmac_sha256(format!("AWS4{}", s3.secret_key).as_bytes(), &date_stamp);
+    let date_key = hmac_sha256(
+        format!("AWS4{}", config.secret_key()).as_bytes(),
+        &date_stamp,
+    );
     let region_key = hmac_sha256(&date_key, region);
     let service_key = hmac_sha256(&region_key, "s3");
     let signing_key = hmac_sha256(&service_key, "aws4_request");
@@ -816,14 +846,19 @@ fn percent_encode(value: &str) -> String {
         .collect()
 }
 
-fn sign_delete_request(s3: &S3Cfg, bucket_id: &str, bucket: &str, key: &str) -> DeleteSignResponse {
-    let target = s3_target(s3, &s3.endpoint, bucket, key);
-    let region = signing_region(s3);
+fn sign_delete_request(
+    s3: &S3Cfg,
+    config: &StorageBucketCfg,
+    bucket_id: &str,
+    key: &str,
+) -> DeleteSignResponse {
+    let target = s3_target(s3, config, config.endpoint(s3), &config.bucket, key);
+    let region = signing_region(s3, config);
 
     let signed = sign_request(
         "DELETE",
-        &s3.access_key,
-        &s3.secret_key,
+        config.access_key(),
+        config.secret_key(),
         &target.host,
         &target.path,
         "",
@@ -1023,7 +1058,7 @@ fn normalize_object_key(input: &str, s3: &S3Cfg, bucket: &StorageBucketCfg) -> O
         raw.trim_start_matches('/').to_string()
     };
 
-    if s3.addressing_style == S3AddressingStyle::Path
+    if bucket.addressing_style(s3) == S3AddressingStyle::Path
         && let Some(stripped) = key.strip_prefix(&format!("{}/", bucket.bucket))
     {
         key = stripped.to_string();
@@ -1088,10 +1123,10 @@ fn content_type_for_media_ext(ext: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    fn test_s3_cfg(provider: S3Provider) -> S3Cfg {
+    fn test_s3_cfg(provider: &str) -> S3Cfg {
         S3Cfg {
-            provider,
-            endpoint: "https://example-s3.local".to_string(),
+            provider: provider.to_string(),
+            endpoint: Some("https://example-s3.local".to_string()),
             addressing_style: S3AddressingStyle::Path,
             internal_endpoint: None,
             buckets: vec![
@@ -1100,36 +1135,62 @@ mod tests {
                     bucket: "avatar-bucket".to_string(),
                     read_policy: ReadPolicy::Public,
                     key_prefix: "avatars".to_string(),
+                    provider: None,
+                    endpoint: None,
+                    addressing_style: None,
+                    internal_endpoint: None,
+                    region: None,
+                    access_key: Some("access".to_string()),
+                    secret_key: Some("secret".to_string()),
                 },
                 StorageBucketCfg {
                     id: IMAGE_BUCKET_ID.to_string(),
                     bucket: "image-bucket".to_string(),
                     read_policy: ReadPolicy::Private,
                     key_prefix: "users".to_string(),
+                    provider: None,
+                    endpoint: None,
+                    addressing_style: None,
+                    internal_endpoint: None,
+                    region: None,
+                    access_key: Some("access".to_string()),
+                    secret_key: Some("secret".to_string()),
                 },
                 StorageBucketCfg {
                     id: DOCUMENT_BUCKET_ID.to_string(),
                     bucket: "document-bucket".to_string(),
                     read_policy: ReadPolicy::Private,
                     key_prefix: "users".to_string(),
+                    provider: None,
+                    endpoint: None,
+                    addressing_style: None,
+                    internal_endpoint: None,
+                    region: None,
+                    access_key: Some("access".to_string()),
+                    secret_key: Some("secret".to_string()),
                 },
                 StorageBucketCfg {
                     id: MEDIA_BUCKET_ID.to_string(),
                     bucket: "media-bucket".to_string(),
                     read_policy: ReadPolicy::Private,
                     key_prefix: "users".to_string(),
+                    provider: None,
+                    endpoint: None,
+                    addressing_style: None,
+                    internal_endpoint: None,
+                    region: None,
+                    access_key: Some("access".to_string()),
+                    secret_key: Some("secret".to_string()),
                 },
             ],
             region: Some("us-east-1".to_string()),
-            access_key: "access".to_string(),
-            secret_key: "secret".to_string(),
             user_key_salt: Some("salt".to_string()),
         }
     }
 
     #[test]
     fn normalize_key_removes_path_style_bucket_prefix() {
-        let s3 = test_s3_cfg(S3Provider::S3);
+        let s3 = test_s3_cfg("s3");
         let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
         let key = normalize_object_key(
             "https://example-s3.local/avatar-bucket/avatars/u1",
@@ -1142,28 +1203,53 @@ mod tests {
 
     #[test]
     fn bucket_config_owns_physical_bucket_selection() {
-        let s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        let s3 = test_s3_cfg("cloudflare_r2");
         let bucket = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
 
         assert_eq!(
-            s3_target(&s3, &s3.endpoint, &bucket.bucket, "avatars/u1").url,
+            s3_target(
+                &s3,
+                bucket,
+                bucket.endpoint(&s3),
+                &bucket.bucket,
+                "avatars/u1"
+            )
+            .url,
             "https://example-s3.local/avatar-bucket/avatars/u1"
         );
     }
 
     #[test]
     fn internal_s3_endpoint_only_applies_to_service_requests() {
-        let mut s3 = test_s3_cfg(S3Provider::S3);
+        let mut s3 = test_s3_cfg("s3");
         s3.internal_endpoint = Some("http://127.0.0.1:29999/".to_string());
 
-        assert_eq!(internal_s3_endpoint(&s3), "http://127.0.0.1:29999/");
-        assert_eq!(s3_host(internal_s3_endpoint(&s3)), "127.0.0.1:29999");
+        let bucket = storage_bucket(&s3, IMAGE_BUCKET_ID).unwrap();
+        assert_eq!(internal_s3_endpoint(&s3, bucket), "http://127.0.0.1:29999/");
         assert_eq!(
-            s3_target(&s3, internal_s3_endpoint(&s3), "image-bucket", "image.png").url,
+            s3_host(internal_s3_endpoint(&s3, bucket)),
+            "127.0.0.1:29999"
+        );
+        assert_eq!(
+            s3_target(
+                &s3,
+                bucket,
+                internal_s3_endpoint(&s3, bucket),
+                "image-bucket",
+                "image.png"
+            )
+            .url,
             "http://127.0.0.1:29999/image-bucket/image.png"
         );
         assert_eq!(
-            s3_target(&s3, &s3.endpoint, "image-bucket", "image.png").url,
+            s3_target(
+                &s3,
+                bucket,
+                bucket.endpoint(&s3),
+                "image-bucket",
+                "image.png"
+            )
+            .url,
             "https://example-s3.local/image-bucket/image.png"
         );
     }
@@ -1212,7 +1298,7 @@ mod tests {
 
     #[test]
     fn ownership_uses_logical_bucket_category_and_prefix() {
-        let s3 = test_s3_cfg(S3Provider::CloudflareR2);
+        let s3 = test_s3_cfg("cloudflare_r2");
         let avatar = storage_bucket(&s3, AVATAR_BUCKET_ID).unwrap();
         let image = storage_bucket(&s3, IMAGE_BUCKET_ID).unwrap();
         assert_eq!(
@@ -1227,7 +1313,7 @@ mod tests {
 
     #[test]
     fn legacy_key_without_bucket_id_resolves_its_logical_category() {
-        let s3 = test_s3_cfg(S3Provider::S3);
+        let s3 = test_s3_cfg("s3");
 
         assert_eq!(
             requested_bucket_id(&s3, None, "avatars/u1").unwrap(),
