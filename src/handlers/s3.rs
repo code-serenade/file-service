@@ -13,15 +13,16 @@ use toolcraft_axum_kit::{
     ApiError, IntoCommonResponse, ResponseResult, middleware::auth_mw::AuthUser,
 };
 use toolcraft_request::{HeaderMap, Request};
-use toolcraft_utils::{presign_get_object, sign_request};
+use toolcraft_utils::sign_request;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
     error::error_code,
     models::s3::{
-        AccessSignQuery, DeleteSignQuery, DeleteSignResponse, DownloadSignResponse,
-        ServerUploadResponse, UploadAvatarQuery, UploadExtQuery, UploadHeaders, UploadSignResponse,
+        AccessDisposition, AccessSignQuery, DeleteSignQuery, DeleteSignResponse,
+        DownloadSignResponse, ServerUploadResponse, UploadAvatarQuery, UploadExtQuery,
+        UploadHeaders, UploadSignResponse,
     },
     settings::{ReadPolicy, S3AddressingStyle, S3Cfg, StorageBucketCfg},
     utils::base62::encode_u128,
@@ -254,7 +255,8 @@ pub async fn access_sign(
                 &bucket.bucket,
                 &normalized_key,
             )
-            .url,
+            .url + "?response-content-disposition="
+                + query.disposition.as_str(),
             key: normalized_key,
         }
     } else {
@@ -266,7 +268,7 @@ pub async fn access_sign(
         if !is_user_owned_key(&bucket_id, bucket, &user_scope, &normalized_key) {
             return Err((StatusCode::FORBIDDEN, Json(error_code::FORBIDDEN.into())));
         }
-        sign_access_request(&s3, bucket, &bucket_id, &normalized_key)
+        sign_access_request(&s3, bucket, &bucket_id, &normalized_key, query.disposition)
     };
 
     Ok(response.into_common_response().to_json())
@@ -749,29 +751,10 @@ fn sign_access_request(
     config: &StorageBucketCfg,
     bucket_id: &str,
     key: &str,
+    disposition: AccessDisposition,
 ) -> DownloadSignResponse {
-    let region = signing_region(s3, config);
-
-    let download_url = if config.addressing_style(s3) == S3AddressingStyle::VirtualHost {
-        presign_virtual_get(
-            s3,
-            config,
-            &config.bucket,
-            key,
-            region.unwrap_or("us-east-1"),
-            600,
-        )
-    } else {
-        presign_get_object(
-            config.access_key(),
-            config.secret_key(),
-            &config.bucket,
-            key,
-            region,
-            config.endpoint(s3),
-            Some(600),
-        )
-    };
+    let region = signing_region(s3, config).unwrap_or("us-east-1");
+    let download_url = presign_access_url(s3, config, key, region, disposition, 600);
 
     DownloadSignResponse {
         bucket_id: bucket_id.to_string(),
@@ -781,15 +764,15 @@ fn sign_access_request(
     }
 }
 
-fn presign_virtual_get(
+fn presign_access_url(
     s3: &S3Cfg,
     config: &StorageBucketCfg,
-    bucket: &str,
     key: &str,
     region: &str,
+    disposition: AccessDisposition,
     expires_secs: u64,
 ) -> String {
-    let target = s3_target(s3, config, config.endpoint(s3), bucket, key);
+    let target = s3_target(s3, config, config.endpoint(s3), &config.bucket, key);
     let now = Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -799,13 +782,23 @@ fn presign_virtual_get(
         date_stamp,
         region
     );
-    let query = format!(
-        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={}&X-Amz-Expires={}&\
-         X-Amz-SignedHeaders=host",
-        percent_encode(&credential),
-        amz_date,
-        expires_secs,
-    );
+    let mut query_params = vec![
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_owned()),
+        ("X-Amz-Credential", credential),
+        ("X-Amz-Date", amz_date.clone()),
+        ("X-Amz-Expires", expires_secs.to_string()),
+        ("X-Amz-SignedHeaders", "host".to_owned()),
+        (
+            "response-content-disposition",
+            disposition.as_str().to_owned(),
+        ),
+    ];
+    query_params.sort_by_key(|(name, _)| *name);
+    let query = query_params
+        .iter()
+        .map(|(name, value)| format!("{}={}", percent_encode(name), percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
     let canonical_request = format!(
         "GET\n{}\n{}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
         target.path, query, target.host

@@ -5,6 +5,25 @@ pub struct AccessSignQuery {
     #[serde(default)]
     pub bucket_id: Option<String>,
     pub key: String,
+    #[serde(default)]
+    pub disposition: AccessDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessDisposition {
+    Inline,
+    #[default]
+    Attachment,
+}
+
+impl AccessDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Attachment => "attachment",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
