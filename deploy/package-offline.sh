@@ -15,10 +15,6 @@ if [ ! -f "$DEPLOY_ENV" ]; then
   DEPLOY_ENV="$SCRIPT_DIR/runtime/deploy.env"
 fi
 
-random_hex() {
-  od -An -N 32 -tx1 /dev/urandom | tr -d ' \n'
-}
-
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "error: missing Docker image: $IMAGE" >&2
   echo "run deploy/build-release.sh first" >&2
@@ -50,11 +46,11 @@ chmod +x "$BUNDLE_DIR/stop.sh"
 chmod +x "$BUNDLE_DIR/start.sh"
 chmod +x "$BUNDLE_DIR/restart.sh"
 
-echo "==> Generating deployment-specific user key salt"
-user_key_salt="$(random_hex)"
-sed "s/replace_with_random_user_key_salt/$user_key_salt/" \
-  "$BUNDLE_DIR/deploy.env" > "$BUNDLE_DIR/deploy.env.tmp"
-mv "$BUNDLE_DIR/deploy.env.tmp" "$BUNDLE_DIR/deploy.env"
+user_key_salt="$(sed -n 's/^USER_KEY_SALT=//p' "$BUNDLE_DIR/deploy.env")"
+if [ -z "$user_key_salt" ] || [[ "$user_key_salt" == replace_with_* ]]; then
+  echo "error: set a persistent USER_KEY_SALT in $DEPLOY_ENV before packaging" >&2
+  exit 1
+fi
 chmod 600 "$BUNDLE_DIR/deploy.env"
 
 tar_args=()
@@ -71,6 +67,7 @@ if [ "${#tar_args[@]}" -gt 0 ]; then
 else
   COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_PATH" -C "$OUTPUT_ROOT" "$BUNDLE_NAME"
 fi
+chmod 600 "$ARCHIVE_PATH"
 
 echo "==> Done"
 echo "Offline bundle: $ARCHIVE_PATH"

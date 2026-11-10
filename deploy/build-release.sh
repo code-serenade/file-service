@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PLATFORM="linux/amd64"
-BUILDER_IMAGE="rust:1.94-alpine3.22"
+BUILDER_IMAGE="rust:1.99.1-alpine3.24"
 IMAGE="file-service:local"
 ARTIFACT_DIR="$SCRIPT_DIR/artifacts"
 
